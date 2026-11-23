@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import struct
 import sys
 import time
 from collections import Counter, defaultdict
@@ -288,6 +289,77 @@ def analyze_events(paths: list[Path]) -> dict[str, object]:
                                   sorted(failures.items(), key=lambda v: (-sum(v[1].values()), v[0]))}}
 
 
+
+METRIC_WIRE = struct.Struct(">8I")
+METRIC_MAGIC = 0x4A464D31
+
+
+def analyze_metrics(paths: list[Path]) -> dict[str, object]:
+    """Decode fixed 32-byte big-endian JFM1 records; never trust an input file."""
+    sessions: dict[int, dict[str, object]] = {}
+    malformed = truncated = samples = 0
+    for path in paths:
+        if path.stat().st_size > MAX_ARCHIVE_BYTES:
+            raise MailboxError("metrics archive exceeds bounded maximum: " + str(path))
+        with path.open("rb") as stream:
+            while True:
+                raw = stream.read(METRIC_WIRE.size)
+                if not raw:
+                    break
+                if len(raw) != METRIC_WIRE.size:
+                    truncated += len(raw)
+                    break
+                magic, generation, free_kb, queue, audio_ms, flags, clock_ms, reserved = (
+                    METRIC_WIRE.unpack(raw)
+                )
+                if magic != METRIC_MAGIC or reserved != 0:
+                    malformed += 1
+                    continue
+                entry = sessions.setdefault(generation, {
+                    "samples": 0,
+                    "first_free_kb": free_kb,
+                    "last_free_kb": free_kb,
+                    "min_free_kb": free_kb,
+                    "max_free_kb": free_kb,
+                    "min_queue": queue,
+                    "max_queue": queue,
+                    "first_audio_clock_ms": audio_ms,
+                    "last_audio_clock_ms": audio_ms,
+                    "paused_samples": 0,
+                    "forced_samples": 0,
+                    "elapsed_observed_ms": 0,
+                    "clock_discontinuities": 0,
+                    "_last_clock": None,
+                })
+                entry["samples"] += 1
+                entry["last_free_kb"] = free_kb
+                entry["min_free_kb"] = min(entry["min_free_kb"], free_kb)
+                entry["max_free_kb"] = max(entry["max_free_kb"], free_kb)
+                entry["min_queue"] = min(entry["min_queue"], queue)
+                entry["max_queue"] = max(entry["max_queue"], queue)
+                entry["last_audio_clock_ms"] = audio_ms
+                entry["paused_samples"] += bool(flags & 1)
+                entry["forced_samples"] += bool(flags & 2)
+                last_clock = entry["_last_clock"]
+                if last_clock is not None:
+                    elapsed = (clock_ms - last_clock) & 0xffffffff
+                    if elapsed <= 600000:
+                        entry["elapsed_observed_ms"] += elapsed
+                    else:
+                        entry["clock_discontinuities"] += 1
+                entry["_last_clock"] = clock_ms
+                samples += 1
+    for entry in sessions.values():
+        entry.pop("_last_clock")
+        entry["free_memory_delta_kb"] = entry["last_free_kb"] - entry["first_free_kb"]
+    return {
+        "total_samples": samples,
+        "malformed_records": malformed,
+        "truncated_trailing_bytes": truncated,
+        "sessions": {str(k): v for k, v in sorted(sessions.items())},
+    }
+
+
 def cli(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("PS3_HOST", "192.168.31.178"))
@@ -308,10 +380,15 @@ def cli(argv: Optional[list[str]] = None) -> int:
     collect.add_argument("--output", type=Path, required=True)
     analyze = sub.add_parser("analyze", help="Aggregate existing server JSONL event logs offline")
     analyze.add_argument("paths", type=Path, nargs="+")
+    metrics = sub.add_parser("metrics", help="Decode JFM1 PS3 binary metric archives offline")
+    metrics.add_argument("paths", type=Path, nargs="+")
     args = parser.parse_args(argv)
     try:
         if args.command == "analyze":
             print(json.dumps(analyze_events(args.paths), indent=2))
+            return 0
+        if args.command == "metrics":
+            print(json.dumps(analyze_metrics(args.paths), indent=2))
             return 0
         with PS3Mailbox(args.host, port=args.port, timeout=args.timeout) as mailbox:
             if args.command == "probe":
