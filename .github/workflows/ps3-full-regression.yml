@@ -60,3 +60,23 @@ jobs:
           path: host-regression/
           if-no-files-found: warn
           retention-days: 14
+
+  endian:
+    name: PowerPC64 big-endian decoder equivalence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install disposable PowerPC64 cross-check tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-powerpc64-linux-gnu qemu-user ffmpeg
+      - name: Compare native and big-endian decoder output
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tests
+          make -f Makefile.host endian ENDIAN_FIXTURE=tones51.dts
