@@ -360,6 +360,99 @@ def analyze_metrics(paths: list[Path]) -> dict[str, object]:
     }
 
 
+
+def run_soak(mailbox: PS3Mailbox, secret: str, destination: Path,
+             duration_s: int, interval_s: int, exercise_controls: bool = False,
+             clock: Callable[[], float] = time.monotonic,
+             sleep: Callable[[float], None] = time.sleep) -> dict[str, object]:
+    """Finite active-Surf test: no media selection or favorites modification."""
+    if not 1 <= duration_s <= 3600 or not 15 <= interval_s <= 600:
+        raise MailboxError("soak duration must be 1..3600s and interval 15..600s")
+    destination.mkdir(parents=True, exist_ok=True)
+    report: dict[str, object] = {
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "max_duration_s": duration_s,
+        "interval_s": interval_s,
+        "exercise_controls": exercise_controls,
+        "snapshots": [],
+        "errors": [],
+        "result": "running",
+    }
+    report_file = destination / "soak_report.json"
+    deadline = clock() + duration_s
+    controls_completed = False
+    paused_by_us = False
+
+    def save_report() -> None:
+        report_file.write_text(json.dumps(report, indent=2) + "\n",
+                               encoding="utf-8")
+
+    try:
+        # A status request also verifies that the PS3 is running this exact
+        # native mailbox implementation and provides the session generation.
+        first = mailbox.send("get_status", secret)
+        generation = int(first.get("generation", "0"))
+        mode = first.get("mode", "")
+        if generation < 1 or mode not in ("all", "sports", "movies-series"):
+            raise MailboxError("no eligible Surf playback session")
+        report["generation"] = generation
+        report["mode"] = mode
+        save_report()
+        while True:
+            if clock() >= deadline and report["snapshots"]:
+                break
+            snapshot = mailbox.send("capture_metrics", secret)
+            if (int(snapshot.get("generation", "0")) != generation or
+                snapshot.get("mode") != mode):
+                raise MailboxError("Surf session changed during unattended test")
+            snapshot["elapsed_s"] = max(0, int(duration_s - max(0.0, deadline - clock())))
+            report["snapshots"].append(snapshot)
+            save_report()
+            if exercise_controls and not controls_completed:
+                mailbox.send("pause_surf", secret, generation=generation)
+                paused_by_us = True
+                try:
+                    mailbox.send("resume_surf", secret, generation=generation)
+                    paused_by_us = False
+                finally:
+                    # On failure, retry resume only as a best-effort state
+                    # restoration; never retry a favorite or non-idempotent act.
+                    if paused_by_us:
+                        try:
+                            mailbox.send("resume_surf", secret, generation=generation)
+                            paused_by_us = False
+                        except (MailboxError,) + ftplib.all_errors:
+                            pass
+                controls_completed = True
+                report["controls_tested"] = ["pause_surf", "resume_surf"]
+                save_report()
+            remaining = deadline - clock()
+            if remaining <= 0:
+                break
+            sleep(min(interval_s, remaining))
+        report["result"] = "local_capture_complete"
+    except (MailboxError,) + ftplib.all_errors as exc:
+        report["result"] = "failed"
+        report["errors"].append(f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if paused_by_us:
+            report["errors"].append("pause/resume restoration not confirmed")
+        try:
+            report["files"] = mailbox.collect(destination)
+            present = [p for p in (
+                destination / "remote_metrics.bin",
+                destination / "remote_metrics.prev.bin"
+            ) if p.exists()]
+            if present:
+                report["metrics"] = analyze_metrics(present)
+        except (MailboxError,) + ftplib.all_errors as exc:
+            report["errors"].append("diagnostic collection: " + str(exc))
+        report["ended_utc"] = datetime.now(timezone.utc).isoformat()
+        save_report()
+    return report
+
+
 def cli(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=os.environ.get("PS3_HOST", "192.168.31.178"))
@@ -382,6 +475,12 @@ def cli(argv: Optional[list[str]] = None) -> int:
     analyze.add_argument("paths", type=Path, nargs="+")
     metrics = sub.add_parser("metrics", help="Decode JFM1 PS3 binary metric archives offline")
     metrics.add_argument("paths", type=Path, nargs="+")
+    soak = sub.add_parser("soak", help="Run a finite unattended Surf diagnostic test")
+    soak.add_argument("--secret-file", type=Path, required=True)
+    soak.add_argument("--output", type=Path, required=True)
+    soak.add_argument("--duration", type=int, default=600)
+    soak.add_argument("--interval", type=int, default=30)
+    soak.add_argument("--exercise-controls", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "analyze":
@@ -409,6 +508,13 @@ def cli(argv: Optional[list[str]] = None) -> int:
                 print(json.dumps(response, indent=2))
             elif args.command == "collect":
                 print(json.dumps(mailbox.collect(args.output), indent=2))
+            elif args.command == "soak":
+                secret = args.secret_file.read_text(encoding="ascii").strip()
+                report = run_soak(mailbox, secret, args.output, args.duration,
+                                  args.interval, args.exercise_controls)
+                print(json.dumps({"result": report["result"],
+                                  "snapshot_count": len(report["snapshots"]),
+                                  "report": str(args.output / "soak_report.json")}, indent=2))
         return 0
     except (MailboxError,) + ftplib.all_errors as exc:
         print(f"ps3-harness: {type(exc).__name__}: {exc}", file=sys.stderr)
