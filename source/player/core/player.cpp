@@ -40,6 +40,7 @@
 #include "player_picture.h"
 #include "player_internal.h"
 #include "surf_sync.h"
+#include "remote_mailbox.h"
 #include "player_stats.h"
 #include "sub_overlay.h"
 #include "ui.h"
@@ -1606,6 +1607,27 @@ void show_player_run(const JFItem *item, u32 resume_secs,
         }
         flip_queued = false;
         sysUtilCheckCallback();
+
+        if (g_prog.surf_mode[0]) {
+            JfRemoteCommand remote = {};
+            if (jf_remote_take(&remote)) {
+                if (remote.generation != g_prog.gen) {
+                    jf_remote_finish(remote.id, false, "session changed", g_prog.gen);
+                } else if (!strcmp(remote.action, "set_audio_sync_beta")) {
+                    surf_sync_set_enabled(remote.value != 0);
+                    jf_remote_finish(remote.id, true, "audio sync setting applied",
+                                     g_prog.gen);
+                } else if (!strcmp(remote.action, "stop_playback")) {
+                    jf_remote_finish(remote.id, true, "stopping playback", g_prog.gen);
+                    ps.playing = false;
+                    g_prog.playing = false;
+                    break;
+                } else if (!player_remote_surf_action(&ps, remote.action, remote.id)) {
+                    jf_remote_finish(remote.id, false, "Surf action busy or unavailable",
+                                     g_prog.gen);
+                }
+            }
+        }
 
         static u64 s_loop_iter_us   = 0;
         static u64 s_loop_frame_dur = 0;
