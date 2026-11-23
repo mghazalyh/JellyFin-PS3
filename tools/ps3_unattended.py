@@ -253,6 +253,9 @@ class PS3Mailbox:
                     report.append({"file": local_name, "status": "missing"})
                 else:
                     raise
+            except MailboxError as exc:
+                report.append({"file": local_name, "status": "skipped",
+                               "reason": str(exc)})
         manifest = {"captured_utc": datetime.now(timezone.utc).isoformat(),
                     "console": self.host, "files": report}
         (destination / "manifest.json").write_text(
