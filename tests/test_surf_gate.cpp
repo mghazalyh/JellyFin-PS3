@@ -19,6 +19,14 @@ int main(void) {
     assert(surf_seq_reached(101,100));
     assert(!surf_seq_reached(99,100));
     assert(surf_seq_reached(1,0xffffffffu));
-    puts("Surf scene gate host tests passed");
+    const char *json = "[{\"source\":\"Sports [HD] \\\"quoted\\\"\",\"token\":\"abc\"},"
+                       "{\"source\":\"Film [4K]\"}] tail";
+    const char *end = surf_json_array_end(json);
+    assert(end && end[1] == ' ' && end > json + 50);
+    assert(!surf_json_array_end(NULL));
+    assert(!surf_json_array_end("]"));
+    assert(!surf_json_array_end("[{\"name\":\"unclosed\"}"));
+    assert(!surf_json_array_end("[{\"name\":\"unclosed}]"));
+    puts("Surf scene gate and JSON history scanner tests passed");
     return 0;
 }

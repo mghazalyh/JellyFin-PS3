@@ -178,6 +178,11 @@ struct PlayerState {
     volatile bool paused;
     volatile bool dec_run;       // decode-thread stop flag (toggled on seek)
     int      frame_count;
+    // Updated by player_display_frame ONLY when a staged YUV picture is
+    // swapped into the front texture. The caller records this exact sequence
+    // on the flip it is actually about to queue.
+    bool     surf_new_picture;
+    u32      surf_presented_seq;
 
     // Absolute media time (us) corresponding to the current stream's PTS 0.
     // Jellyfin restarts the transcode PTS at 0 on the initial open and on every
@@ -262,6 +267,9 @@ HudAction player_handle_menu_action(PlayerState *ps, HudAction act);
 // Picture and Statistics on a live channel).  START again closes it.  row: the
 // row the cursor starts on.
 void player_open_options(PlayerState *ps, int row);
+// Drop a Previous-channel selection on a new playback. Any detached worker
+// from an older generation cannot publish feedback into the new session.
+void surf_menu_session_reset(void);
 
 // Remembered audio/subtitle track choice, for the rest of this app run (not
 // persisted to disk -- a binge session is the whole point; surviving a

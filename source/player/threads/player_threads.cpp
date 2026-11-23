@@ -625,11 +625,6 @@ void progress_thread_fn(void *arg) {
     while (PROG_LIVE()) {
         usleep(250000);              // 250 ms granularity for a quick exit
         if (!PROG_LIVE()) break;
-        if (g_prog.surf_mode[0]) {
-            SurfSyncEvent evt;
-            if (surf_sync_take_event(&evt) && PROG_LIVE())
-                surf_post_sync_event(&evt);
-        }
         // Decode-thread watchdog: no progress for 2 s -> say where it is.
         if (!g_prog.paused && g_prog.pos_valid) {
             const u32 it = g_dec_iter;
@@ -657,6 +652,19 @@ void progress_thread_fn(void *arg) {
         snprintf(item, sizeof item, "%s", g_prog.item);   // a live channel changes
         snprintf(live_id, sizeof live_id, "%s", g_prog.live_id);
         jellyfin_report_progress(item, sess, pos_ticks, g_prog.paused, live_id);
+        // Remote telemetry is best-effort and lower-priority than Surf source
+        // polling or Jellyfin progress. Never block every 250ms loop on HTTP.
+        if (g_prog.surf_mode[0] && PROG_LIVE()) {
+            SurfSyncEvent evt;
+            if (surf_sync_take_event(&evt)) {
+                char line[112];
+                snprintf(line, sizeof line,
+                         "surf_sync_event: trace=%s event=%s state=%s",
+                         evt.trace, evt.event, evt.state);
+                plog(line);
+                surf_post_sync_event(&evt);
+            }
+        }
     }
     #undef PROG_LIVE
 
@@ -695,13 +703,16 @@ void upload_thread_fn(void *arg) {
         // the two cannot disagree.  The display needs it to distinguish a
         // new picture from a re-upload of the one already on screen.
         const u32 seq_a  = jbuf_peek_seq();
-        sysMutexUnlock(s_jbuf_mtx);
-
-        if (!slot_a) { usleep(1000); continue; }
-        if (g_prog.surf_mode[0]) {
+        if (slot_a && g_prog.surf_mode[0] && surf_sync_enabled()) {
+            // jbuf front may advance and be recycled after unlocking. Sample
+            // its 64 luminance points while the producer/consumer mutex still
+            // protects the contents, never from an unlocked stale pointer.
             surf_sync_probe_video(slot_a, jbuf_fw(), jbuf_fh(),
                                   seq_a, jbuf_peek_pts_us());
         }
+        sysMutexUnlock(s_jbuf_mtx);
+
+        if (!slot_a) { usleep(1000); continue; }
 
         __asm__ volatile("sync" ::: "memory");
         int back = s_vid_disp_idx ^ 1;

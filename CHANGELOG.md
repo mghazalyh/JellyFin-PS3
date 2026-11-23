@@ -10,6 +10,26 @@ public: it froze on the Home screen on real hardware, ran out of memory at
 1080p, and had sign-in and update-check bugs (see 3.3.0 below). vortigauntlet's own release notes for 3.2.3
 and earlier are kept at the end, as he wrote them.
 
+## 3.6.4 (PS3 Surf hardware-safety audit)
+
+- **Supersedes 3.6.3 Surf beta 1**, which should not be installed for the first PS3 test:
+  its experimental synchronizer cleared the CellAudio DMA ring from the wrong
+  thread, tracked a queued rather than displayed frame sequence, and had an
+  excessive 12-second mute recovery.
+- CellAudio ring clearing now happens on the dedicated writer thread only.
+  Experimental PCM muting is **OFF by default** and available on the Surf
+  Options menu for deliberate testing. The fallback is 3 seconds, not 12.
+- The display-loop captures the staged YUV sequence before releasing its
+  ownership to the upload thread; audio release requires a confirmed flip.
+- Source telemetry cannot postpone a Favorite operation. Playback source
+  polling is prioritized ahead of best-effort remote telemetry.
+- Luma samples are read while the jitter-buffer mutex still protects the
+  decoded picture. Old controller responses and Favorite selections are
+  discarded on new playback generations.
+- These measures reduce hardware risk, but exact source-to-frame attribution
+  is still unavailable without an in-band source epoch. Real PS3 testing
+  remains necessary.
+
 ## 3.6.3 (Surf PS3 fork, prerelease)
 
 - Native PS3 START/Options controller commands for Surf Pause, Resume, Favorite

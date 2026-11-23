@@ -6,6 +6,7 @@
 #include "surf_sync.h"
 #include "surf_gate_logic.h"
 #include "audio.h"
+#include "audio_bitstream.h"
 #include "timing.h"
 #include "plog.h"
 
@@ -29,6 +30,7 @@ static u32 fnv1a(const char *s) {
 }
 
 static bool s_active = false, s_have_source = false;
+static bool s_enabled = false; // per session, opt-in by controller
 static u32 s_generation = 0, s_epoch = 0;
 static u32 s_source_hash = 0, s_boot_hash = 0;
 static char s_mode[24], s_source[152];
@@ -37,10 +39,10 @@ static bool s_have_luma = false, s_cut_found = false;
 static u8 s_luma[64] = {0};
 static u32 s_last_luma_seq = 0, s_candidate_seq = 0;
 static u32 s_flip_seq = 0;
-static u64 s_candidate_pts = 0, s_flip_pts = 0;
-static u64 s_gate_at = 0, s_first_video_at = 0;
+static u64 s_candidate_pts = 0;
+static u64 s_gate_at = 0;
 static unsigned s_cut_avg = 0, s_cut_changed = 0;
-static bool s_paused = false;
+
 
 static SurfSyncEvent s_events[16];
 static unsigned s_ev_read = 0, s_ev_write = 0;
@@ -76,17 +78,44 @@ void surf_sync_session(const char *mode, u32 generation) {
     audio_set_transition_gate(false);
     lock_state();
     s_active = mode && mode[0];
+    s_enabled = false;
     snprintf(s_mode, sizeof s_mode, "%s", mode ? mode : "");
     s_source[0] = '\0';
     s_generation = generation;
     s_epoch = 0; s_source_hash = s_boot_hash = 0;
     s_have_source = false;
     s_transition_pending = s_gating = false;
-    s_have_luma = s_cut_found = s_paused = false;
+    s_have_luma = s_cut_found = false;
     s_last_luma_seq = s_candidate_seq = s_flip_seq = 0;
-    s_candidate_pts = s_flip_pts = s_gate_at = s_first_video_at = 0;
+    s_candidate_pts = s_gate_at = 0;
     s_ev_read = s_ev_write = 0;
     unlock_state();
+}
+
+void surf_sync_set_enabled(bool enabled) {
+    bool changed = false, next = false;
+    lock_state();
+    next = s_active && enabled;
+    if (s_enabled != next) {
+        s_enabled = next;
+        s_transition_pending = false;
+        s_gating = false;
+        s_cut_found = false;
+        changed = true;
+        event_locked("source_changed", next ? "sync_beta_enabled" : "sync_beta_disabled");
+    }
+    unlock_state();
+    if (changed) {
+        audio_set_transition_gate(false);
+        plog(next ? "surf_sync: experimental PCM sync ENABLED" :
+                    "surf_sync: experimental PCM sync DISABLED");
+    }
+}
+bool surf_sync_enabled(void) {
+    lock_state();
+    const bool enabled = s_active && s_enabled;
+    unlock_state();
+    return enabled;
 }
 
 void surf_sync_stop(void) {
@@ -115,19 +144,26 @@ void surf_sync_observe_source(const char *mode, const char *source,
         event_locked("source_changed", "initial_source");
         unlock_state(); return;
     }
+    bool changed = false;
+    u32 epoch = 0;
     if (sh != s_source_hash || bh != s_boot_hash) {
         s_source_hash = sh; s_boot_hash = bh;
         snprintf(s_source, sizeof s_source, "%s", source);
         s_epoch++;
-        s_transition_pending = true;
-        s_cut_found = false; s_have_luma = false;
-        event_locked("source_changed", "transition_observed");
-        char b[116];
-        snprintf(b, sizeof b, "surf_sync: epoch=%u source_hash=%08x change_seen",
-                 (unsigned)s_epoch, (unsigned)sh);
-        plog(b);
+        epoch = s_epoch;
+        s_transition_pending = s_enabled;
+        s_cut_found = false;
+        event_locked("source_changed", s_enabled ? "transition_observed" :
+                                                  "observed_sync_disabled");
+        changed = true;
     }
     unlock_state();
+    if (changed) {
+        char b[116];
+        snprintf(b, sizeof b, "surf_sync: epoch=%u source_hash=%08x observed",
+                 (unsigned)epoch, (unsigned)sh);
+        plog(b);
+    }
 }
 
 void surf_sync_display_tick(bool paused) {
@@ -136,22 +172,21 @@ void surf_sync_display_tick(bool paused) {
     u32 epoch = 0;
     const u64 now = timing_get_us();
     lock_state();
-    s_paused = paused;
-    if (s_active && s_transition_pending && !paused) {
+    if (s_active && s_enabled && s_transition_pending && !paused) {
         s_transition_pending = false;
-        s_gating = true;
+        s_gating = !audio_passthrough_active();
         s_gate_at = now;
-        s_first_video_at = 0;
-        s_cut_found = false;
+            s_cut_found = false;
         s_have_luma = false;
-        start = true;
+        start = s_gating;
         epoch = s_epoch;
-        event_locked("source_changed", "audio_gate_started");
+        event_locked("source_changed", start ? "audio_gate_started" :
+                                                    "bitstream_gate_skipped");
     }
     // Recovery ceiling, not the synchronization strategy: avoid a permanently
     // silent stream when a channel freezes or no visible scene cut is detected.
-    if (s_active && s_gating && !paused &&
-        now >= s_gate_at && now - s_gate_at >= 12000000ULL) {
+    if (s_active && s_enabled && s_gating && !paused &&
+        now >= s_gate_at && now - s_gate_at >= 3000000ULL) {
         s_gating = false;
         release = true;
         age_ms = (now - s_gate_at) / 1000ULL;
@@ -186,7 +221,7 @@ void surf_sync_probe_video(const u8 *y, u32 width, u32 height, u32 sequence,
         }
     }
     lock_state();
-    if (s_active && sequence != s_last_luma_seq) {
+    if (s_active && s_enabled && sequence != s_last_luma_seq) {
         if (s_gating && s_have_luma && !s_cut_found) {
             unsigned avg = 0, changed = 0;
             if (surf_cut_detect(s_luma, now, 64, &avg, &changed)) {
@@ -207,7 +242,7 @@ void surf_sync_probe_video(const u8 *y, u32 width, u32 height, u32 sequence,
 void surf_sync_flip_queued(u32 sequence, u64 pts_us) {
     lock_state();
     s_flip_seq = sequence;
-    s_flip_pts = pts_us;
+    (void)pts_us;
     unlock_state();
 }
 
@@ -217,14 +252,13 @@ void surf_sync_flip_completed(bool success) {
     u32 epoch = 0, seq = 0, avg = 0, changed = 0;
     u64 pts = 0, duration = 0;
     lock_state();
-    if (s_active && s_gating && s_cut_found &&
+    if (s_active && s_enabled && s_gating && s_cut_found &&
         surf_seq_reached(s_flip_seq, s_candidate_seq)) {
         s_gating = false;
         release = true; epoch = s_epoch;
-        seq = s_flip_seq; pts = s_flip_pts;
+        seq = s_flip_seq; pts = s_candidate_pts;
         avg = s_cut_avg; changed = s_cut_changed;
         duration = timing_get_us() - s_gate_at;
-        s_first_video_at = timing_get_us();
         event_locked("source_changed", "video_flip_audio_release");
     }
     unlock_state();

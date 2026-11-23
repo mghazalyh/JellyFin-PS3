@@ -97,6 +97,7 @@ static void stats_on_picture_shown(void) {
     player_stats_on_frame_shown();
 }
 void player_display_frame(PlayerState *ps) {
+    ps->surf_new_picture = false;
     check_fps_fallback(ps);
     log_refresh_rate();
 
@@ -313,6 +314,12 @@ one_to_one_done: ;
         u32 disp_seq = jbuf_peek_seq();
         ps->frame_count++;
         __asm__ volatile("sync" ::: "memory");
+        // Snapshot BEFORE acknowledging the upload. The upload thread may
+        // overwrite s_vid_uploaded_seq as soon as frame_ready becomes false.
+        if (ps->live && g_prog.surf_mode[0]) {
+            ps->surf_presented_seq = s_vid_uploaded_seq;
+            ps->surf_new_picture = true;
+        }
         s_vid_frame_ready = false;
         s_vid_disp_idx ^= 1;
         stats_on_picture_shown();   // observe only; ignores re-staged frames
@@ -368,12 +375,22 @@ one_to_one_done: ;
         }
     } else if (silent_flip && s_vid_frame_ready) {
         __asm__ volatile("sync" ::: "memory");
+        // Snapshot BEFORE acknowledging the upload. The upload thread may
+        // overwrite s_vid_uploaded_seq as soon as frame_ready becomes false.
+        if (ps->live && g_prog.surf_mode[0]) {
+            ps->surf_presented_seq = s_vid_uploaded_seq;
+            ps->surf_new_picture = true;
+        }
         s_vid_frame_ready = false;
         s_vid_disp_idx ^= 1;
         stats_on_picture_shown();   // observe only; ignores re-staged frames
     } else if (ps->show_seek_frame && ps->paused && s_vid_frame_ready) {
         // Paused seek: display the target frame exactly once, staying paused.
         __asm__ volatile("sync" ::: "memory");
+        if (ps->live && g_prog.surf_mode[0]) {
+            ps->surf_presented_seq = s_vid_uploaded_seq;
+            ps->surf_new_picture = true;
+        }
         s_vid_frame_ready = false;
         s_vid_disp_idx ^= 1;
         ps->show_seek_frame = false;

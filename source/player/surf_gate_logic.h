@@ -29,3 +29,26 @@ static inline bool surf_cut_detect(const uint8_t *old_luma,
 static inline bool surf_seq_reached(uint32_t presented, uint32_t candidate) {
     return (int32_t)(presented - candidate) >= 0;
 }
+
+
+// Return the real closing bracket of a JSON array. Delimiters inside strings
+// are ordinary characters (channel names often contain [HD] or escaped quotes).
+// No recursion, heap allocation, or reads beyond the string terminator.
+static inline const char *surf_json_array_end(const char *open) {
+    if (!open || *open != '[') return 0;
+    unsigned depth = 1;
+    bool quoted = false, escaped = false;
+    for (const char *p = open + 1; *p; ++p) {
+        if (quoted && escaped) { escaped = false; continue; }
+        if (quoted && *p == '\\') { escaped = true; continue; }
+        if (*p == '"') { quoted = !quoted; continue; }
+        if (quoted) continue;
+        if (*p == '[') {
+            if (depth == 32) return 0;
+            ++depth;
+        } else if (*p == ']' && --depth == 0) {
+            return p;
+        }
+    }
+    return 0;
+}

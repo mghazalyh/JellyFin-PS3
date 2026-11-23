@@ -27,10 +27,16 @@ resolve a unique original channel, it returns an error instead.
 
 ## Adaptive audio transition (beta)
 
-On a source change, the PS3 keeps decoding audio but gates its PCM output. It
+**The experimental adaptive sync starts OFF by default.** To test it,
+choose START > Adaptive Audio Sync (Beta) > On while watching Surf.
+A new playback resets it to Off.
+
+When explicitly enabled, on a source change the PS3 keeps decoding audio
+but gates its PCM output. It
 waits for a substantial decoded-picture change and for a queued flip to finish.
-It then releases audio without an arbitrary fixed short delay. A 12-second
-recovery bound prevents a permanent mute on a stalled source.
+It then releases audio without an arbitrary fixed short delay. A 3-second
+recovery bound prevents an extended mute on a stalled source. The audio
+writer alone owns live DMA ring writes; renderer code only sets a flag.
 
 **Limitation:** There is no upstream-source epoch embedded in video packets
 after Jellyfin remuxing. A luma scene change is a useful decoder-side
@@ -53,5 +59,6 @@ field correlates a client observation to the CatalogService log. Logs are
 bounded by the server's standard rate limits and retention policy. No raw
 stream URL or authentication token is logged.
 
-This prerelease's PKG is built with pinned ps3dev nightly-2026-07-26
+Version 3.6.4 supersedes the untested 3.6.3 Surf beta. Its PKG is built
+with pinned ps3dev nightly-2026-07-26
 GCC 7.2.0. Physical-console synchronization remains to be verified.

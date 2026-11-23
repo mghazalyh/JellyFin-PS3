@@ -2,11 +2,34 @@ name: Publish PS3 Surf package
 on:
   push:
     tags:
-      - "v3.6.3-surf.*"
+      - "v3.6.4-surf.*"
 permissions:
   contents: write
 jobs:
+  audit:
+    name: Host regression and sanitizer tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Surf gate, history, Live TV, stream request and jitter buffer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tests
+          make -f Makefile.host -B test_surf_gate test_release_version test_live_watch test_livetv test_stream_request test_jbuf_order
+          for test in test_surf_gate test_release_version test_live_watch test_livetv test_stream_request test_jbuf_order; do
+            "./$test"
+          done
+          python3 ../tools/i18n.py check
+      - name: Address and undefined behavior sanitizers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tests
+          c++ -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -o /tmp/surf_gate_asan test_surf_gate.cpp
+          /tmp/surf_gate_asan
   publish:
+    needs: audit
     runs-on: ubuntu-latest
     steps:
       - name: Check out verified Surf build
@@ -24,4 +47,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" release/JellyFin-PS3.pkg release/JellyFin-PS3.pkg.sha256 --repo "$GITHUB_REPOSITORY" --title "JellyFin PS3 Surf 3.6.3 (beta)" --notes-file docs/surf-release-notes.md --prerelease --verify-tag
+          gh release create "$GITHUB_REF_NAME" release/JellyFin-PS3.pkg release/JellyFin-PS3.pkg.sha256 --repo "$GITHUB_REPOSITORY" --title "JellyFin PS3 Surf 3.6.4 (beta)" --notes-file docs/surf-release-notes.md --prerelease --verify-tag

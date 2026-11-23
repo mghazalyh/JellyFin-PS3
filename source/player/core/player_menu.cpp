@@ -19,7 +19,9 @@
 #include "timing.h"
 #include "jellyfin_api.h"
 #include "http.h"
-#include "audio.h"           // audio_get_clock_us
+#include "audio.h"
+#include "surf_sync.h"
+#include "surf_gate_logic.h"           // audio_get_clock_us
 #include "autoskip.h"        // Skip Intros / Skip Credits
 #include "statsovl.h"        // Playback Statistics
 #include "../../build_config.h"   // ENABLE_PLAYER_STATS (relative: source/ is not on the -I path)
@@ -176,11 +178,16 @@ struct SurfActionJob {
     char source[152];
     char previous_token[40];
     char trace[32];
+    u32 generation;
+    u32 menu_epoch;
     char *token;
 };
 
 static volatile int s_surf_busy = 0;
 static volatile int s_surf_feedback_ready = 0;
+static volatile u32 s_surf_feedback_generation = 0;
+static volatile u32 s_surf_feedback_menu_epoch = 0;
+static u32 s_surf_menu_epoch = 0;
 static char s_surf_feedback_mode[24] = "";
 static char s_surf_feedback_text[144] = "";
 static char s_surf_result_source[152] = "";
@@ -192,6 +199,14 @@ static bool s_surf_result_selection = false;
 static char s_surf_selected_source[152] = "";
 static char s_surf_selected_token[40] = "";
 static char s_surf_selected_mode[24] = "";
+
+void surf_menu_session_reset(void) {
+    ++s_surf_menu_epoch;
+    s_surf_selected_source[0] = '\0';
+    s_surf_selected_token[0] = '\0';
+    s_surf_selected_mode[0] = '\0';
+    __sync_lock_test_and_set(&s_surf_feedback_ready, 0);
+}
 
 static bool surf_token_valid(const char *token) {
     if (!token || strlen(token) != 32) return false;
@@ -212,7 +227,7 @@ static bool surf_recent_next(const char *json, const char *selected_token,
     token[0] = '\0';
     const char *list = strstr(json, "\"recent_sources\"");
     if (!list || !(list = strchr(list, '['))) return false;
-    const char *end = strchr(list, ']');
+    const char *end = surf_json_array_end(list);
     if (!end) return false;
     struct SurfHistoryEntry {
         char source[152];
@@ -374,9 +389,8 @@ static void surf_action_worker(void *arg) {
                               !select_current && !previous &&
                               strcmp(job->action, "status") != 0;
     const bool post_favorite = valid && (favorite_previous || favorite_current);
-    if (post_favorite)
-        surf_send_client_event(job, "favorite_clicked", current,
-                               favorite_previous ? job->source : "", status);
+    // Favoriting takes priority over best-effort telemetry. Posting telemetry
+    // first can allow the server to rotate before the requested favorite.
 
     if (post_action || (valid && favorite_current)) {
         const char *method = favorite_previous ? "favorite" : job->action;
@@ -404,15 +418,20 @@ static void surf_action_worker(void *arg) {
                          "Surf %s failed (HTTP %d)", method, status);
             }
         }
-        if (post_favorite)
+        if (post_favorite) {
+            surf_send_client_event(job, "favorite_clicked", current,
+                                   favorite_previous ? job->source : "", status);
             surf_send_client_event(job,
                 status >= 200 && status < 300 ? "favorite_confirmed" : "favorite_failed",
                 current, favorite_previous ? job->source : "", status);
+        }
     }
 
     if (job) {
         snprintf(s_surf_feedback_mode, sizeof s_surf_feedback_mode, "%s",
                  job->mode);
+        s_surf_feedback_generation = job->generation;
+        s_surf_feedback_menu_epoch = job->menu_epoch;
         free(job->token);
         job->token = NULL;
         free(job);
@@ -435,7 +454,9 @@ static void surf_feedback_poll(const PlayerState *ps) {
     if (!__sync_lock_test_and_set(&s_surf_feedback_ready, 0)) return;
     __sync_synchronize();
     const char *mode = surf_mode_for(ps);
-    if (!mode || strcmp(mode, s_surf_feedback_mode)) return;
+    if (!mode || strcmp(mode, s_surf_feedback_mode) ||
+        s_surf_feedback_generation != g_prog.gen ||
+        s_surf_feedback_menu_epoch != s_surf_menu_epoch) return;
     if (s_surf_result_selection) {
         snprintf(s_surf_selected_source, sizeof s_surf_selected_source, "%s",
                  s_surf_result_source);
@@ -465,6 +486,8 @@ static void surf_action(PlayerState *ps, const char *action) {
     memset(job, 0, sizeof *job);
     snprintf(job->mode, sizeof job->mode, "%s", mode);
     snprintf(job->action, sizeof job->action, "%s", action);
+    job->generation = g_prog.gen;
+    job->menu_epoch = s_surf_menu_epoch;
     snprintf(job->trace, sizeof job->trace, "ps3_%08x_%08x",
              (unsigned)timing_get_us(), (unsigned)ps->frame_count);
     if (strcmp(s_surf_selected_mode, mode) != 0) {
@@ -512,7 +535,7 @@ enum { OPT_CHAPTERS, OPT_TRACKS, OPT_PICTURE, OPT_STATS, OPT_NEXT, OPT_PREV,
        OPT_SKIP_INTRO, OPT_SKIP_CREDITS,
        OPT_SURF_PAUSE, OPT_SURF_RESUME, OPT_SURF_FAVORITE,
        OPT_SURF_PREVIOUS, OPT_SURF_FAVORITE_PREVIOUS, OPT_SURF_CURRENT,
-       OPT_SURF_STATUS, OPT_MAX };
+       OPT_SURF_STATUS, OPT_SURF_SYNC, OPT_MAX };
 static int         s_opt_kind[OPT_MAX];
 static const char *s_opt_items[OPT_MAX];
 static const char *s_opt_vals[OPT_MAX];
@@ -604,6 +627,9 @@ void player_open_options(PlayerState *ps, int row) {
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Clear Previous selection"); n++;
         s_opt_kind[n] = OPT_SURF_STATUS; s_opt_items[n] = "Show Surf Source Status";
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Publisher state may lead screen"); n++;
+        s_opt_kind[n] = OPT_SURF_SYNC; s_opt_items[n] = "Adaptive Audio Sync (Beta)";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
+                 surf_sync_enabled() ? "On (experimental)" : "Off by default"); n++;
     }
     for (int i = 0; i < n; i++) s_opt_vals[i] = s_opt_valbuf[i];
     s_opt_n = n;
@@ -635,6 +661,7 @@ static HudAction options_select(PlayerState *ps, int sel) {
     case OPT_SURF_FAVORITE_PREVIOUS: surf_action(ps,"favorite_previous"); break;
     case OPT_SURF_CURRENT:           surf_action(ps,"current"); break;
     case OPT_SURF_STATUS:            surf_action(ps,"status"); break;
+    case OPT_SURF_SYNC:              surf_sync_set_enabled(!surf_sync_enabled()); break;
     default: return HUD_ACTION_NONE;
     }
     player_open_options(ps, sel);          // a setting: stay, on the same row

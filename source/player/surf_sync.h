@@ -6,6 +6,8 @@
 // display loop may confirm an actually completed flip and release the gate.
 void surf_sync_session(const char *mode, u32 generation);
 void surf_sync_stop(void);
+void surf_sync_set_enabled(bool enabled);
+bool surf_sync_enabled(void);
 void surf_sync_observe_source(const char *mode, const char *source,
                               const char *source_id, const char *boot,
                               u32 generation);

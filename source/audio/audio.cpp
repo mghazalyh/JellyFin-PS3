@@ -41,21 +41,26 @@ static u64               s_read_idx_ea = 0;
 static volatile u64 s_audio_blocks = 0;
 static u32          s_pcm_blocks   = 0;
 static u32          s_sil_blocks   = 0;
-static volatile bool s_transition_gate = false;
+// The display thread publishes only an atomic flag. ONLY the audio writer
+// may mutate the live DMA ring; clearing it from another PPU thread races
+// audio_write_pcm() and can publish partially filled samples to CellAudio.
+static volatile int s_transition_gate = 0;
+static volatile u32 s_transition_epoch = 0;
+static u32 s_audio_seen_epoch = 0;  // audio writer thread only
+
 void audio_set_transition_gate(bool gated) {
-    // A new gate invalidates the short PCM runway already queued to hardware.
-    // The ordinary audio writer sees the gate before its next DMA block.
-    const bool was = s_transition_gate;
-    s_transition_gate = gated;
-    __sync_synchronize();
-    if (gated && !was && s_audio_ok && s_data_start &&
-        s_num_blocks && !audio_passthrough_active()) {
-        memset((void*)(uintptr_t)s_data_start, 0,
-               (size_t)s_num_blocks * s_port_channels *
-               AUDIO_BLOCK_SAMPLES * sizeof(float));
+    if (!gated) {
+        __sync_lock_test_and_set(&s_transition_gate, 0);
+    } else if (__sync_fetch_and_add(&s_transition_gate, 0) == 0) {
+        // Publish the new request epoch BEFORE the ON flag, so the audio
+        // thread never sees a gate paired with the previous generation.
+        __sync_add_and_fetch(&s_transition_epoch, 1);
+        __sync_lock_test_and_set(&s_transition_gate, 1);
     }
 }
-bool audio_transition_gate_active(void) { return s_transition_gate; }
+bool audio_transition_gate_active(void) {
+    return __sync_fetch_and_add(&s_transition_gate, 0) != 0;
+}
 
 u64 audio_block_count(void) { return s_audio_blocks; }
 
@@ -374,6 +379,19 @@ bool audio_write_pcm(void) {
     sys_event_t ev;
     if (sysEventQueueReceive(s_audio_eq, &ev, 0) != 0) return false;
     if (s_data_start) {
+        // Drain the pre-gate PCM runway on the SAME thread that owns writes.
+        // CellAudio may still be reading it (the normal pause path does the
+        // same), but concurrent PPU writes to the ring are prohibited.
+        const bool gated = audio_transition_gate_active();
+        const u32 epoch = __sync_fetch_and_add(&s_transition_epoch, 0u);
+        if (gated && s_audio_seen_epoch != epoch &&
+            !audio_passthrough_active() && s_num_blocks) {
+            memset((void *)(uintptr_t)s_data_start, 0,
+                   (size_t)s_num_blocks * s_port_channels *
+                   AUDIO_BLOCK_SAMPLES * sizeof(float));
+            s_audio_seen_epoch = epoch;
+            plog("surf_sync: pcm DMA cleared by audio writer");
+        }
         // PSL1GHT audio/audio.h: block address = audioDataStart +
         // blk * numChannels * AUDIO_BLOCK_SAMPLES * sizeof(float).
         // numChannels is the PORT width (8 for surround), and a block is
@@ -508,7 +526,8 @@ bool audio_write_pcm(void) {
 }
 
 void audio_close(void) {
-    s_transition_gate = false;
+    audio_set_transition_gate(false);
+    s_audio_seen_epoch = 0;
     crash_log("ax1 audio_close enter");
     // A video open suspended the menu sounds; bring them back however that
     // open went (a no-op after music, which never suspends them).
