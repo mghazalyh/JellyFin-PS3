@@ -18,6 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+ALLOWED_CHANGE_PATHS = (
+    "source/player/", "tests/", "tools/",
+    "docs/ps3-unattended-harness.md",
+    ".github/workflows/ps3-harness.yml",
+)
+
 MAX_OUTPUT = 8 * 1024 * 1024
 ALLOWED_BRANCH_PREFIX = "feature/ps3-unattended-harness-"
 PHASES = ("audit", "implement", "review", "validate")
@@ -113,6 +119,54 @@ def run(argv: list[str], cwd: Path, timeout: int, log: Path,
     }
 
 
+def read_opencode_result(log: Path) -> dict[str, object]:
+    """Require parseable OpenCode event JSONL and at least one actual answer."""
+    text_parts = 0
+    errors = 0
+    events = 0
+    with log.open("rt", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise HarnessError("OpenCode output is not valid JSONL") from exc
+            if not isinstance(event, dict):
+                raise HarnessError("OpenCode event is not a JSON object")
+            events += 1
+            kind = event.get("type")
+            if kind == "error" or event.get("error"):
+                errors += 1
+            part = event.get("part")
+            if isinstance(part, dict):
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    if part["text"].strip():
+                        text_parts += 1
+                state = part.get("state")
+                if isinstance(state, dict) and state.get("status") == "error":
+                    errors += 1
+    if errors or not text_parts:
+        raise HarnessError("OpenCode returned errors or no substantive answer")
+    return {"events": events, "answer_parts": text_parts, "error_events": errors}
+
+
+def changed_paths(status: str) -> list[str]:
+    paths = []
+    for raw in status.splitlines():
+        if len(raw) < 4:
+            raise HarnessError("invalid git status output")
+        path = raw[3:]
+        if (" -> " in path or '"' in path or "\\" in path or
+            path.startswith("/") or path.startswith("../") or
+            ".." in path.split("/")):
+            raise HarnessError("unsafe or ambiguous changed path")
+        if not any(path.startswith(prefix) for prefix in ALLOWED_CHANGE_PATHS):
+            raise HarnessError("OpenCode changed a file outside allowlisted locations: " + path)
+        paths.append(path)
+    return paths
+
+
 def git_check(repo: Path, logdir: Path, timeout: int = 15) -> tuple[str, str]:
     def git(*cmd: str) -> str:
         r = run(["git", *cmd], repo, timeout, logdir / ("git_" + cmd[0] + ".log"))
@@ -133,9 +187,12 @@ def independent_validation(repo: Path, out: Path, timeout: int) -> dict[str, obj
     checks = {
         "python_compile": [sys.executable, "-m", "py_compile",
                            "tools/ps3_unattended.py", "tools/opencode_harness.py",
-                           "tests/test_ps3_unattended.py"],
+                           "tests/test_ps3_unattended.py",
+                           "tests/test_opencode_harness.py"],
         "python_unittest": [sys.executable, "-m", "unittest", "discover",
-                            "-s", "tests", "-p", "test_ps3_unattended.py", "-v"],
+                            "-s", "tests", "-p", "test_*harness.py", "-v"],
+        "ftp_unittest": [sys.executable, "-m", "unittest", "discover",
+                         "-s", "tests", "-p", "test_ps3_unattended.py", "-v"],
         "git_diff_check": ["git", "diff", "--check"],
     }
     results = {}
@@ -148,11 +205,16 @@ def execute(repo: Path, out: Path, phases: list[str],
             opencode: str, timeout: int, check_timeout: int) -> dict[str, object]:
     out.mkdir(parents=True, exist_ok=True)
     branch, initial_status = git_check(repo, out)
+    initial_rev = run(["git", "rev-parse", "HEAD"], repo, 15, out / "initial_head.log")
+    if not initial_rev["ok"]:
+        raise HarnessError("cannot establish immutable initial Git HEAD")
+    base_head = (out / "initial_head.log").read_text(encoding="ascii").strip()
     if initial_status and "implement" in phases:
         raise HarnessError("implementation stage requires a clean working tree")
     manifest: dict[str, object] = {
         "started_utc": utc_now(), "branch": branch,
-        "initial_status": initial_status, "phases": {},
+        "initial_status": initial_status, "initial_head": base_head,
+        "phases": {},
         "push_performed": False, "deployment_performed": False,
     }
     try:
@@ -174,10 +236,20 @@ def execute(repo: Path, out: Path, phases: list[str],
                 manifest["phases"][phase] = result
                 if not result["ok"] or result["stdout_bytes"] == 0:
                     raise HarnessError("OpenCode " + phase + " did not complete successfully")
+                evidence = read_opencode_result(out / (phase + ".jsonl"))
+                manifest["phases"][phase + "_events"] = evidence
                 after = git_check(repo, out)[1]
+                current_rev = run(["git", "rev-parse", "HEAD"], repo, 15,
+                                  out / (phase + "_head.log"))
+                if not current_rev["ok"] or (out / (phase + "_head.log")).read_text().strip() != base_head:
+                    raise HarnessError("OpenCode created or changed Git HEAD unexpectedly")
                 if phase != "implement" and after != before:
                     raise HarnessError("read-only agent modified the checkout")
                 if phase == "implement":
+                    changed = changed_paths(after)
+                    if not changed:
+                        raise HarnessError("OpenCode implement returned without any source changes")
+                    manifest["phases"]["modified_files"] = changed
                     validation = independent_validation(repo, out, check_timeout)
                     manifest["phases"]["post_implement_validation"] = validation
                     if not all(r["ok"] for r in validation.values()):
