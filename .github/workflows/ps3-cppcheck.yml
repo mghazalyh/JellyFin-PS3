@@ -1,0 +1,83 @@
+name: PS3 static analysis (Cppcheck)
+on:
+  push:
+    branches:
+      - main
+      - feature/ps3-surf-native-20261123
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cppcheck:
+    name: Scan PS3 C and C++ source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install analyzer
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y cppcheck
+          cppcheck --version
+      - name: Static analysis with PS3 pointer sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p static-analysis
+          find source -type f \( -name '*.c' -o -name '*.cpp' \) \
+            ! -path 'source/audio/mlp/ff/*' \
+            ! -path 'source/audio/a52/*' \
+            ! -path 'source/audio/dca/*' \
+            ! -path 'source/audio/dcahd/*' \
+            ! -path 'source/gfx/stb*' \
+            ! -path 'source/ui/fonts/*' \
+            | LC_ALL=C sort > static-analysis/firstparty-files.txt
+          cppcheck \
+            --platform=unix64 \
+            --enable=warning,performance,portability \
+            --inconclusive \
+            --max-configs=5 \
+            --suppress=missingIncludeSystem \
+            --suppress=missingInclude \
+            --template='{file}:{line}:{column}:[{severity}][{id}]:{message}' \
+            --quiet -j 2 \
+            -Isource -Isource/audio -Isource/net -Isource/api -Isource/util \
+            -Isource/video -Isource/player -Isource/player/core -Isource/player/hud \
+            --file-list=static-analysis/firstparty-files.txt \
+            2> static-analysis/cppcheck.txt
+          python3 - <<'PY'
+          from collections import Counter
+          from pathlib import Path
+          import os
+          import re
+          findings = Path("static-analysis/cppcheck.txt").read_text(errors="replace").splitlines()
+          counts = Counter()
+          for item in findings:
+              m = re.search(r":\[(error|warning|portability|performance|style|information)\]\[", item)
+              if m: counts[m.group(1)] += 1
+          total = sum(counts.values())
+          files = len(Path("static-analysis/firstparty-files.txt").read_text().splitlines())
+          s = (
+              "## PS3 Cppcheck analysis\n\n"
+              + f"Source files: {files}; diagnostic findings: {total}.\n\n"
+              + f"Error: {counts['error']}; Warning: {counts['warning']}; "
+              + f"Portability: {counts['portability']}; Performance: {counts['performance']}.\n\n"
+              + "These are potential issues, not verified defects. "
+              + "Includes diagnostic warnings from transitively included vendor headers.\n"
+          )
+          Path("static-analysis/summary.md").write_text(s)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as f: f.write(s)
+          print(s)
+          PY
+      - name: Upload full findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps3-cppcheck-report
+          path: static-analysis/
+          if-no-files-found: warn
+          retention-days: 14
