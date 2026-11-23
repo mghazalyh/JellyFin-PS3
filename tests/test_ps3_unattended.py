@@ -66,7 +66,7 @@ class FakeFTP:
                               if line.startswith("id="))
             self.files[h.RESPONSE_PATH] = h.wire_encode({
                 "id": command_id, "status": self.answer,
-                "detail": "verified action", "generation": "123",
+                "detail": "verified action", "generation": "123", "mode": "all",
             })
 
     def delete(self, name):
@@ -168,6 +168,40 @@ class HarnessTests(unittest.TestCase):
             with self.assertRaises(h.MailboxError):
                 log.write_bytes(b"x" * (h.MAX_ARCHIVE_BYTES + 1))
                 h.analyze_metrics([log])
+
+    def test_unattended_soak_is_bounded_and_archived(self):
+        fake = FakeFTP()
+        with tempfile.TemporaryDirectory() as folder:
+            output = pathlib.Path(folder) / "evidence"
+            clock_value = [0.0]
+
+            def clock():
+                return clock_value[0]
+
+            def sleep(seconds):
+                clock_value[0] += seconds
+
+            with h.PS3Mailbox("127.0.0.1", ftp_factory=lambda: fake) as controller:
+                result = h.run_soak(controller, "a" * 64, output,
+                                    duration_s=16, interval_s=15,
+                                    exercise_controls=True,
+                                    clock=clock, sleep=sleep)
+            self.assertEqual(result["result"], "local_capture_complete")
+            self.assertEqual(result["generation"], 123)
+            self.assertEqual(result["mode"], "all")
+            self.assertEqual(len(result["snapshots"]), 2)
+            self.assertEqual(result["controls_tested"], ["pause_surf", "resume_surf"])
+            self.assertTrue((output / "soak_report.json").exists())
+            self.assertTrue((output / "manifest.json").exists())
+
+    def test_soak_input_limits(self):
+        fake = FakeFTP()
+        with tempfile.TemporaryDirectory() as folder:
+            with h.PS3Mailbox("127.0.0.1", ftp_factory=lambda: fake) as controller:
+                with self.assertRaises(h.MailboxError):
+                    h.run_soak(controller, "a" * 64, pathlib.Path(folder), 3601, 30)
+                with self.assertRaises(h.MailboxError):
+                    h.run_soak(controller, "a" * 64, pathlib.Path(folder), 60, 1)
 
     def test_streaming_offline_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
