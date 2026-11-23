@@ -406,7 +406,7 @@ void decode_thread_fn(void *arg) {
             // whether a starved ring is the network's fault or ours.
             u64 rxb = 0, rxw = 0; u32 rxc = 0;
             stream_rx_stats(&rxb, &rxw, &rxc);
-            static u64 s_rxb_last = 0, s_rxw_last = 0; static u32 s_rxc_last = 0;
+            static u64 s_rxb_last = 0, s_rxw_last = 0;
             static u64 s_rx_t_last = 0;
             u64 rx_now = timing_get_us();
             // Every one of these is a RATE over the interval since the last
@@ -421,8 +421,7 @@ void decode_thread_fn(void *arg) {
                             : (double)(rxb - s_rxb_last) * 8.0 / (double)rx_span;
             int    rx_wpct  = rx_first ? 0
                             : (int)(((rxw - s_rxw_last) * 100ULL) / rx_span);
-            unsigned rx_n   = rx_first ? 0u : (rxc - s_rxc_last);
-            s_rxb_last = rxb; s_rxw_last = rxw; s_rxc_last = rxc; s_rx_t_last = rx_now;
+            s_rxb_last = rxb; s_rxw_last = rxw; s_rx_t_last = rx_now;
             // adt=<% of one PPU thread the audio decoder used this interval>.
             // The collapse always coincides with pcm= emptying, so this is the
             // number that says whether lossless HD audio simply costs more than

@@ -706,7 +706,9 @@ void search_end(void) {
 
 // Select: ask for a name, then list the channels that match it.
 void search_ask(void) {
-    char term[48];
+    // A cancelled PS3 keyboard may leave its output untouched. strlen() must
+    // never inspect uninitialized stack data on a cancelled search.
+    char term[48] = {};
     rsxSync();                              // finish this frame before the keyboard takes over
     flip();
     const int r = get_input(term, sizeof term, TR("Search channels"), false);

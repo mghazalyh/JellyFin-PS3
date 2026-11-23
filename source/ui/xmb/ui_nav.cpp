@@ -394,8 +394,8 @@ bool xmb_open_series(const XMBItem *it) {
     g_active_tab = tvt;
     strncpy(g_tv_series_id,   it->id,   sizeof(g_tv_series_id) - 1);
     strncpy(g_tv_series_name, it->name, sizeof(g_tv_series_name) - 1);
-    g_tv_series_id[sizeof(g_tv_series_id) - 1]     = ' ';
-    g_tv_series_name[sizeof(g_tv_series_name) - 1] = ' ';
+    g_tv_series_id[sizeof(g_tv_series_id) - 1]     = '\0';
+    g_tv_series_name[sizeof(g_tv_series_name) - 1] = '\0';
     g_tv_sub_start = 0; g_tv_sub_total = 0;
     g_tv_sub_count = xmb_fetch_seasons(g_tv_series_id, g_tv_sub_items,
                                        XMB_ITEMS_MAX, 0, &g_tv_sub_total);

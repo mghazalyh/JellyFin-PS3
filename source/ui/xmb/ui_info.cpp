@@ -1173,7 +1173,6 @@ static void xmb_show_item_info_v3(const XMBItem *root) {
         // Chip labels, vertically centred in the 29 px pills.
         {
             int x = TX;
-            const int ty_s = CY + (CH - (int)apx) / 2 - UIS_H(1);
             const int ty_r = CY + (CH - (int)cpx) / 2 - UIS_H(1);
             if (aw) { drawTTF((u32)(x + UIS_W(10)), (u32)ty_r, achip, cpx,
                               a_ll ? XMB_ACCENT_ALT : XMB_TEXT_DIM);

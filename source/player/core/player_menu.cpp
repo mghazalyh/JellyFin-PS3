@@ -21,7 +21,7 @@
 #include "http.h"
 #include "audio.h"
 #include "surf_sync.h"
-#include "surf_gate_logic.h"           // audio_get_clock_us
+#include "surf_gate_logic.h" // bounded history parser and scene gate
 #include "autoskip.h"        // Skip Intros / Skip Credits
 #include "statsovl.h"        // Playback Statistics
 #include "../../build_config.h"   // ENABLE_PLAYER_STATS (relative: source/ is not on the -I path)
