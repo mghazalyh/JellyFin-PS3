@@ -44,6 +44,10 @@ jobs:
           ! grep -Ein 'system\(|popen\(|exec[vle]*\(|subprocess|eval\(' \
             source/player/remote_protocol.h source/player/remote_mailbox.cpp tools/ps3_unattended.py
 
+  host:
+    uses: ./.github/workflows/ps3-full-regression.yml
+    needs: protocol
+
   ps3:
     uses: ./.github/workflows/ps3-cloud-build.yml
-    needs: protocol
+    needs: [protocol, host]
