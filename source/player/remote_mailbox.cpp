@@ -118,6 +118,11 @@ void jf_remote_tick(u32 generation, const char *mode, bool playing,
     u32 result_gen = 0;
     bool need_write = false;
     lock_state();
+    // Session teardown must not strand a command in the one-slot mailbox.
+    // This is not confirmation that a remote HTTP request was rolled back.
+    if (!playing && (s_state == 1 || s_state == 2)) {
+        finish_locked(false, "playback ended before confirmation", generation);
+    }
     if (s_state == 2 && timing_get_us() - s_command_started_us > 90000000ULL) {
         finish_locked(false, "Surf action timed out", generation);
     }
