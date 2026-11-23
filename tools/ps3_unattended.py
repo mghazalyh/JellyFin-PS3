@@ -37,7 +37,7 @@ ALLOWED_ACTIONS = frozenset({
 HEX16 = re.compile(r"^[0-9a-f]{16}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-SAFE_VALUE = re.compile(r"^[A-Za-z0-9 _.,:+/@-]{0,160}$")
+SAFE_VALUE = re.compile(r"^[\x20-\x7e]{0,160}$")
 
 
 class MailboxError(RuntimeError):
@@ -181,7 +181,7 @@ class PS3Mailbox:
         return secret
 
     def send(self, action: str, secret: str, generation: int = 0,
-             value: Optional[int] = None, response_timeout: float = 35,
+             value: Optional[int] = None, response_timeout: float = 90,
              poll_interval: float = 0.5) -> dict[str, str]:
         if action not in ALLOWED_ACTIONS:
             raise MailboxError("command is not in the whitelist")
@@ -303,7 +303,7 @@ def cli(argv: Optional[list[str]] = None) -> int:
     send.add_argument("--secret-file", type=Path, required=True)
     send.add_argument("--generation", type=int, default=0)
     send.add_argument("--value", type=int, choices=(0, 1))
-    send.add_argument("--response-timeout", type=float, default=35)
+    send.add_argument("--response-timeout", type=float, default=90)
     collect = sub.add_parser("collect", help="Save bounded diagnostic files")
     collect.add_argument("--output", type=Path, required=True)
     analyze = sub.add_parser("analyze", help="Aggregate existing server JSONL event logs offline")
