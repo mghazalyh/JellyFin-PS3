@@ -1,0 +1,65 @@
+name: PS3 full host regression and sanitizer suite
+
+on:
+  push:
+    branches:
+      - feature/ps3-surf-native-20261123
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Test codecs, Live TV, memory and native Surf logic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host test dependencies on disposable GitHub runner
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 ffmpeg libfaad-dev ntfs-3g time
+      - name: Build, run all host tests and collect memory/CPU measurements
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tests
+          mkdir -p ../host-regression
+          /usr/bin/time -v make -f Makefile.host -j4 check > ../host-regression/full-host-check.log 2>&1 || {
+            tail -n 100 ../host-regression/full-host-check.log
+            exit 1
+          }
+          grep -E 'Maximum resident set size|Elapsed \(wall clock\)|User time|System time' \
+            ../host-regression/full-host-check.log || true
+          tail -n 35 ../host-regression/full-host-check.log
+      - name: Check C and C++ source for accidental NUL bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import sys
+          extensions = {'.cpp','.c','.h','.hpp'}
+          files = [p for p in Path('source').rglob('*') if p.suffix in extensions]
+          bad = [str(p) for p in files if b'\0' in p.read_bytes()]
+          # Existing NUL text literals in ui_nav.cpp are a tracked baseline,
+          # but new NULs in edited code would be a regression.
+          allowed = {'source/ui/xmb/ui_nav.cpp'}
+          unexpected = [p for p in bad if p not in allowed]
+          print(f'Checked {len(files)} C/C++ files; existing NUL files: {bad}')
+          if unexpected:
+              print(f'Unexpected NUL files: {unexpected}', file=sys.stderr)
+              sys.exit(1)
+          PY
+      - name: Archive logs and test resource metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps3-host-regression-results
+          path: host-regression/
+          if-no-files-found: warn
+          retention-days: 14
