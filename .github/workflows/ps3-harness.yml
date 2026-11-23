@@ -1,0 +1,49 @@
+name: PS3 unattended harness safety checks
+
+on:
+  push:
+    branches:
+      - feature/ps3-unattended-harness-20261123
+  pull_request:
+    paths:
+      - 'source/player/remote_*'
+      - 'source/player/core/player.cpp'
+      - 'source/player/core/player_menu.cpp'
+      - 'source/player/threads/player_threads.cpp'
+      - 'tests/test_remote_protocol.cpp'
+      - 'tests/test_ps3_unattended.py'
+      - 'tools/ps3_unattended.py'
+      - '.github/workflows/ps3-harness.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native protocol host test with sanitizers
+        run: |
+          set -euo pipefail
+          cd tests
+          g++ -std=c++11 -O1 -g -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -o test_remote_protocol test_remote_protocol.cpp
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ./test_remote_protocol
+      - name: Run Windows orchestration protocol tests
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/ps3_unattended.py tests/test_ps3_unattended.py
+          python3 -m unittest discover -s tests -p test_ps3_unattended.py -v
+      - name: Ensure no unreviewed forbidden remote actions
+        run: |
+          set -euo pipefail
+          ! grep -Ein 'system\(|popen\(|exec[vle]*\(|subprocess|eval\(' \
+            source/player/remote_protocol.h source/player/remote_mailbox.cpp tools/ps3_unattended.py
+
+  ps3:
+    uses: ./.github/workflows/ps3-cloud-build.yml
+    needs: protocol
