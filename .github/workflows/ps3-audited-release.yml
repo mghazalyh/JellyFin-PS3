@@ -1,0 +1,55 @@
+name: PS3 audited beta release from GitHub
+
+on:
+  push:
+    branches:
+      - feature/ps3-surf-native-20261123
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host_tests:
+    name: Full regression and PPC64 endian gate
+    uses: ./.github/workflows/ps3-full-regression.yml
+
+  ps3_build:
+    name: Pinned PS3 cross-build and package verifier
+    needs: host_tests
+    uses: ./.github/workflows/ps3-cloud-build.yml
+
+  release:
+    name: Publish verified PS3 3.6.5 beta
+    needs: ps3_build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch verified artifact from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: jellyfin-ps3-github-build
+          path: dist
+
+      - name: Verify package checksum and publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='v3.6.5-surf.1'
+          grep -q '^#define APP_VERSION "3.6.5"$' source/net/update_check.h
+          test -s dist/JellyFin-PS3.gnpdrm.pkg
+          (cd dist && sha256sum -c ps3-github-build.sha256)
+          cp dist/JellyFin-PS3.gnpdrm.pkg dist/JellyFin-PS3.pkg
+          (cd dist && sha256sum JellyFin-PS3.pkg > JellyFin-PS3.pkg.sha256)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Already released $TAG; immutable audited assets preserved"
+            exit 0
+          fi
+          gh release create "$TAG" dist/JellyFin-PS3.pkg dist/JellyFin-PS3.pkg.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title 'JellyFin PS3 Surf 3.6.5 (audit beta)' \
+            --notes-file docs/surf-release-notes.md --prerelease
