@@ -20,6 +20,8 @@
 #include "timing.h"
 #include "player_internal.h"
 #include "surf_sync.h"
+#include "remote_mailbox.h"
+#include "meminfo.h"
 #include "player_stats.h"
 #include "jellyfin_api.h"
 #include "api_livetv.h"
@@ -643,7 +645,19 @@ void progress_thread_fn(void *arg) {
             snprintf(guide_item, sizeof guide_item, "%s", g_prog.item);
             live_guide_fetch(guide_item, gen);
         }
-        if (++tick < 40) continue;   // report every ~10 s
+        ++tick;
+        // Filesystem polls and metrics writes run only on this existing
+        // low-priority worker, never on display, decoder or CellAudio paths.
+        if ((tick % 4) == 0 && g_prog.surf_mode[0]) {
+            jf_remote_tick(gen, g_prog.surf_mode, true,
+                           meminfo_avail_kb(), (u32)jbuf_count());
+        }
+        if ((tick % 20) == 0) {
+            jf_remote_sample(gen, meminfo_avail_kb(), (u32)jbuf_count(),
+                             (u32)(audio_get_clock_us() / 1000ULL),
+                             g_prog.paused ? 1U : 0U);
+        }
+        if (tick < 40) continue;   // report every ~10 s
         tick = 0;
         if (!g_prog.pos_valid) continue;  // mid-seek flush: position unstable
         u64 pos_ticks = (g_prog.base_us + audio_get_clock_us()) * 10ULL;
@@ -666,7 +680,12 @@ void progress_thread_fn(void *arg) {
         }
     }
     #undef PROG_LIVE
-
+    // Flush completion from a remote stop before the worker exits. An older
+    // session must not touch a later session's mailbox.
+    if (g_prog.gen == gen && g_prog.surf_mode[0]) {
+        jf_remote_tick(gen, g_prog.surf_mode, false,
+                       meminfo_avail_kb(), (u32)jbuf_count());
+    }
     sysThreadExit(0);
 }
 
