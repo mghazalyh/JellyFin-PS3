@@ -39,6 +39,11 @@ since. See the [changelog](CHANGELOG.md) for everything that changed.
 
 ---
 
+**Custom Surf PS3 fork:** For controller actions, Favorite Current/Previous,
+and audio-transition diagnostics, see [Surf on PlayStation 3](docs/surf-ps3.md).
+The original JellyFin [PS] by jw-notes and the existing credits and license
+are retained.
+
 ## Highlights
 
 | | |

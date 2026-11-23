@@ -60,7 +60,7 @@ EAC3_SRCS = ../source/audio/eac3_api.c $(FF_SHARED_SRCS) ../source/audio/mlp_api
 DTS_HD_DEPS = $(DTS_STREAM_SRC) $(DTS_MAP_SRC) $(DTS_EXSS_SRC) $(DCA_SRCS) \
               ../source/audio/truehd_map.c $(DCAHD_SRCS)
 
-all: test_livetv_quality test_classic_library test_release_version test_login_osk test_login_drawn test_search_model test_sha256 test_release_asset test_auth_data test_wave_scope test_ac3_map test_ac3_decode test_iec61937 test_media_sources test_subtitles \
+all: test_surf_gate test_livetv_quality test_classic_library test_release_version test_login_osk test_login_drawn test_search_model test_sha256 test_release_asset test_auth_data test_wave_scope test_ac3_map test_ac3_decode test_iec61937 test_media_sources test_subtitles \
      test_subtitles_pgs test_trickplay_info test_media_segments \
      test_dts_map test_dts_decode test_dts_stream test_dts_exss test_track_codec \
      test_truehd_map test_truehd_decode test_eac3_decode \
@@ -601,6 +601,7 @@ tones51.thd.ref: tones51.thd
 
 check: all tones51.ac3 tones51.spdif tones51.dts tones51.thd tones51.thd.ref tones51.eac3 tones51.eac3.ref tones51.ac3.ref \
        $(MP4_FIXTURES)
+	./test_surf_gate
 	./test_release_version
 	./test_login_osk
 	./test_login_drawn
@@ -706,6 +707,7 @@ check: all tones51.ac3 tones51.spdif tones51.dts tones51.thd tones51.thd.ref ton
 	$(MAKE) -f Makefile.host endian_music
 
 clean:
+	rm -f test_surf_gate
 	rm -f test_livetv_quality
 	rm -f test_classic_library
 	rm -f test_release_version
@@ -1076,3 +1078,7 @@ test_clock_fmt: test_clock_fmt.c ../source/ui/render/clock_fmt.h ../source/ui/re
 ntfs-write-check:
 	bash fixtures/fs/ntfs_write_check.sh $(or $(NTFS_MODE),quick)
 	bash fixtures/fs/ntfs_write_check.sh quick be
+
+
+test_surf_gate: test_surf_gate.cpp ../source/player/surf_gate_logic.h
+	$(CXX) $(CXXFLAGS) -Wextra -o $@ $<

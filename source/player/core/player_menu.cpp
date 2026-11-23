@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "player_internal.h"
 #include "plog.h"
@@ -16,6 +17,8 @@
 #include "chapters.h"
 #include "player_picture.h"   // picture_cycle_aspect
 #include "timing.h"
+#include "jellyfin_api.h"
+#include "http.h"
 #include "audio.h"           // audio_get_clock_us
 #include "autoskip.h"        // Skip Intros / Skip Credits
 #include "statsovl.h"        // Playback Statistics
@@ -112,8 +115,404 @@ static void open_subs_menu(PlayerState *ps) {
 // it is set to now.  A row that opens something (Chapters, Audio / Subtitles,
 // Picture) hands over to it; a setting (Statistics, the skips) changes in place
 // and the menu stays open on it; Next / Previous end this playback.
+// Surf controller actions are available on the native PS3 Options menu.
+// The on-screen buttons send authenticated requests through CatalogService
+// to the same localhost-only Surf engine used by Jellyfin Web.
+static const char *surf_mode_for(const PlayerState *ps) {
+    if (!ps || !ps->live || !ps->item) return NULL;
+    const char *name = ps->item->name;
+    if (!strcmp(name, "Surf: All Channels")) return "all";
+    if (!strcmp(name, "Surf: Sports")) return "sports";
+    if (!strcmp(name, "Surf: Movies & Series")) return "movies-series";
+    return NULL;
+}
+
+static bool surf_proxy_url(const char *mode, const char *action, char *url, size_t cap) {
+    if (!mode || !g_server[0] || !g_token[0]) return false;
+    const char *begin = strstr(g_server, "://");
+    if (!begin) return false;
+    begin += 3;
+    const char *end = strchr(begin, '/');
+    if (!end) end = begin + strlen(begin);
+    const char *host_end = end;
+    // If a port is specified, remove it.  Leave [IPv6] intact.
+    const char *right_bracket = static_cast<const char*>(memchr(begin, ']', (size_t)(end - begin)));
+    for (const char *p = begin; p < end; p++) {
+        if (*p == ':' && (!right_bracket || p > right_bracket)) {
+            host_end = p;
+            break;
+        }
+    }
+    const int host_len = (int)(host_end - begin);
+    if (host_len <= 0 || host_len > 180) return false;
+    const int n = snprintf(url, cap, "http://%.*s:8097/api/surf/%s%s%s",
+                           host_len, begin, mode, action ? "/" : "",
+                           action ? action : "");
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool surf_json_escape(const char *src, char *dest, size_t cap) {
+    if (!src || !dest || cap < 2) return false;
+    size_t used = 0;
+    for (const unsigned char *p=(const unsigned char*)src; *p; ++p) {
+        char token[3] = {0,0,0};
+        if (*p == '"' || *p == '\\') { token[0]='\\'; token[1]=(char)*p; }
+        else if (*p < 32) continue;
+        else { token[0]=(char)*p; }
+        size_t n = strlen(token);
+        if (used + n + 1 > cap) return false;
+        memcpy(dest + used, token, n);
+        used += n;
+    }
+    dest[used]='\0';
+    return true;
+}
+
+// An Options click is handled on the rendering thread; network IO must not be.
+struct SurfActionJob {
+    char base_url[320];
+    char mode[24];
+    char action[24];
+    char source[152];
+    char previous_token[40];
+    char trace[32];
+    char *token;
+};
+
+static volatile int s_surf_busy = 0;
+static volatile int s_surf_feedback_ready = 0;
+static char s_surf_feedback_mode[24] = "";
+static char s_surf_feedback_text[144] = "";
+static char s_surf_result_source[152] = "";
+static char s_surf_result_token[40] = "";
+static bool s_surf_result_selection = false;
+
+// Owned by the display thread. A worker publishes an immutable result then
+// toggles feedback_ready; it never modifies these fields directly.
+static char s_surf_selected_source[152] = "";
+static char s_surf_selected_token[40] = "";
+static char s_surf_selected_mode[24] = "";
+
+static bool surf_token_valid(const char *token) {
+    if (!token || strlen(token) != 32) return false;
+    for (int i = 0; i < 32; i++) {
+        char c = token[i];
+        if (!((c >= '0' && c <= '9') ||
+              (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) return false;
+    }
+    return true;
+}
+
+static bool surf_recent_next(const char *json, const char *selected_token,
+                             char *source, size_t source_cap,
+                             char *token, size_t token_cap) {
+    if (!json || !source || !token) return false;
+    source[0] = '\0';
+    token[0] = '\0';
+    const char *list = strstr(json, "\"recent_sources\"");
+    if (!list || !(list = strchr(list, '['))) return false;
+    const char *end = strchr(list, ']');
+    if (!end) return false;
+    struct SurfHistoryEntry {
+        char source[152];
+        char token[40];
+    } entries[16];
+    int count = 0;
+    for (const char *pos = list + 1; pos < end && count < 16;) {
+        if (*pos != '{') { pos++; continue; }
+        // Objects in recent_sources contain flat scalar fields. Strings can
+        // have escaped braces, so track quote/escape state before closing.
+        const char *begin = pos++;
+        bool quoted = false, escaped = false;
+        for (; pos < end; pos++) {
+            if (escaped) { escaped = false; continue; }
+            if (*pos == '\\' && quoted) { escaped = true; continue; }
+            if (*pos == '"') { quoted = !quoted; continue; }
+            if (*pos == '}' && !quoted) break;
+        }
+        if (pos >= end) break;
+        const size_t n = (size_t)(pos - begin + 1);
+        pos++;
+        if (n > 580) continue;
+        char object[584];
+        memcpy(object, begin, n);
+        object[n] = '\0';
+        SurfHistoryEntry item = {};
+        if (!json_get_string(object, "source", item.source, sizeof item.source) ||
+            !json_get_string(object, "token", item.token, sizeof item.token) ||
+            !item.source[0] || !surf_token_valid(item.token)) continue;
+        entries[count++] = item;
+    }
+    if (count == 0) return false;
+    int next = 0;
+    if (selected_token && selected_token[0]) {
+        for (int i = 0; i < count; i++)
+            if (!strcmp(entries[i].token, selected_token)) {
+                next = (i + 1) % count;
+                break;
+            }
+    }
+    snprintf(source, source_cap, "%s", entries[next].source);
+    snprintf(token, token_cap, "%s", entries[next].token);
+    return true;
+}
+
+static void surf_send_client_event(const SurfActionJob *job,
+                                   const char *event, const char *source,
+                                   const char *selected_source, int http_status) {
+    if (!job || !event || !job->token) return;
+    char url[360], body[560];
+    char escaped[304] = "", selected[180] = "";
+    if (!surf_json_escape(source ? source : "", escaped, sizeof escaped) ||
+        !surf_json_escape(selected_source ? selected_source : "", selected, sizeof selected))
+        return;
+    const int n = snprintf(url, sizeof url, "%s/telemetry", job->base_url);
+    if (n < 0 || (size_t)n >= sizeof url) return;
+    snprintf(body, sizeof body,
+             "{\"event\":\"%s\",\"source\":\"%s\",\"selected_source\":\"%s\","
+             "\"trace\":\"%s\",\"status_state\":\"ps3_http_%d\"}",
+             event, escaped, selected, job->trace, http_status);
+    char reply[160];
+    // Best effort and bounded by the HTTP helper; never alters the user action.
+    const int rc = http_request(HTTP_POST, url, body,
+                                job->token, reply, sizeof reply);
+    if (rc < 200 || rc >= 300) {
+        char buf[90];
+        snprintf(buf, sizeof buf,
+                 "surf_telemetry: trace=%s event=%s http=%d",
+                 job->trace, event, rc);
+        plog(buf);
+    }
+}
+
+static void surf_action_worker(void *arg) {
+    SurfActionJob *job = static_cast<SurfActionJob*>(arg);
+    char reply[8192] = "";
+    char payload[580] = "{}";
+    char result[144] = "Surf control request failed";
+    char action_url[360] = "";
+    char current[152] = "";
+    char new_source[152] = "";
+    char new_token[40] = "";
+    bool new_selection = false;
+    bool selected_valid = false;
+    int status = 0;
+    bool valid = job && job->token && job->base_url[0];
+    const bool previous = valid && !strcmp(job->action, "previous");
+    const bool favorite_previous = valid && !strcmp(job->action, "favorite_previous");
+    const bool favorite_current = valid && !strcmp(job->action, "favorite");
+    const bool select_current = valid && !strcmp(job->action, "current");
+    const bool get_status = valid && (!strcmp(job->action, "status") ||
+                                      previous || favorite_current);
+
+    if (select_current) {
+        snprintf(result, sizeof result, "%s", "Selection returned to Current");
+        new_selection = true;
+    }
+    if (favorite_previous) {
+        if (!job->source[0] || !surf_token_valid(job->previous_token)) {
+            valid = false;
+            snprintf(result, sizeof result, "%s", "Select Previous Channel first");
+        } else {
+            char escaped[304];
+            if (!surf_json_escape(job->source, escaped, sizeof escaped)) {
+                valid = false;
+                snprintf(result, sizeof result, "%s", "Invalid selected channel name");
+            } else {
+                snprintf(payload, sizeof payload,
+                    "{\"source\":\"%s\",\"previous\":true,"
+                    "\"previous_token\":\"%s\",\"trace\":\"%s\"}",
+                    escaped, job->previous_token, job->trace);
+                snprintf(current, sizeof current, "%s", job->source);
+            }
+        }
+    }
+
+    if (valid && get_status) {
+        status = http_request(HTTP_GET, job->base_url, NULL,
+                              job->token, reply, sizeof reply);
+        if (status != 200) {
+            valid = false;
+            snprintf(result, sizeof result,
+                     "Surf status unavailable (HTTP %d)", status);
+            surf_send_client_event(job, "status_error", "", "", status);
+        } else if (previous) {
+            if (surf_recent_next(reply, job->previous_token,
+                                 new_source, sizeof new_source,
+                                 new_token, sizeof new_token)) {
+                snprintf(result, sizeof result, "Previous: %.124s", new_source);
+                new_selection = true;
+                selected_valid = true;
+                surf_send_client_event(job, "previous_clicked",
+                                       "", new_source, status);
+            } else {
+                snprintf(result, sizeof result, "%s", "No previous playable channel");
+                valid = false;
+                surf_send_client_event(job, "previous_missing", "", "", status);
+            }
+        } else if (!json_get_string(reply, "source", current, sizeof current) ||
+                   !current[0]) {
+            valid = false;
+            snprintf(result, sizeof result, "%s", "No current playable source");
+        } else if (!strcmp(job->action, "status")) {
+            snprintf(result, sizeof result, "Surf sending: %.124s", current);
+        } else {
+            char escaped[304];
+            if (!surf_json_escape(current, escaped, sizeof escaped)) {
+                valid = false;
+                snprintf(result, sizeof result, "%s", "Invalid source name");
+            } else {
+                snprintf(payload, sizeof payload,
+                    "{\"source\":\"%s\",\"trace\":\"%s\"}",
+                    escaped, job->trace);
+            }
+        }
+    }
+
+    const bool post_action = valid && !get_status &&
+                              !select_current && !previous &&
+                              strcmp(job->action, "status") != 0;
+    const bool post_favorite = valid && (favorite_previous || favorite_current);
+    if (post_favorite)
+        surf_send_client_event(job, "favorite_clicked", current,
+                               favorite_previous ? job->source : "", status);
+
+    if (post_action || (valid && favorite_current)) {
+        const char *method = favorite_previous ? "favorite" : job->action;
+        const int n = snprintf(action_url, sizeof action_url,
+                               "%s/%s", job->base_url, method);
+        if (n <= 0 || (size_t)n >= sizeof action_url) {
+            snprintf(result, sizeof result, "%s", "Surf URL is too long");
+            status = 0;
+        } else {
+            reply[0] = '\0';
+            status = http_request(HTTP_POST, action_url, payload,
+                                  job->token, reply, sizeof reply);
+            if (status >= 200 && status < 300) {
+                const char *message =
+                    !strcmp(job->action, "pause")
+                    ? "Looping paused; playback continues"
+                    : !strcmp(job->action, "resume")
+                    ? "Automatic looping resumed"
+                    : favorite_previous
+                    ? "Selected Previous channel favorited"
+                    : "Current server source favorited";
+                snprintf(result, sizeof result, "%s", message);
+            } else {
+                snprintf(result, sizeof result,
+                         "Surf %s failed (HTTP %d)", method, status);
+            }
+        }
+        if (post_favorite)
+            surf_send_client_event(job,
+                status >= 200 && status < 300 ? "favorite_confirmed" : "favorite_failed",
+                current, favorite_previous ? job->source : "", status);
+    }
+
+    if (job) {
+        snprintf(s_surf_feedback_mode, sizeof s_surf_feedback_mode, "%s",
+                 job->mode);
+        free(job->token);
+        job->token = NULL;
+        free(job);
+    }
+    snprintf(s_surf_feedback_text, sizeof s_surf_feedback_text, "%s", result);
+    snprintf(s_surf_result_source, sizeof s_surf_result_source, "%s",
+             selected_valid ? new_source : "");
+    snprintf(s_surf_result_token, sizeof s_surf_result_token, "%s",
+             selected_valid ? new_token : "");
+    s_surf_result_selection = new_selection;
+    __sync_synchronize();
+    __sync_lock_test_and_set(&s_surf_feedback_ready, 1);
+    __sync_lock_release(&s_surf_busy);
+    sysThreadExit(0);
+}
+
+// Only the rendering thread publishes selection to the HUD/menu. Its identity
+// is stable across a Surf rotation and never follows a changing status field.
+static void surf_feedback_poll(const PlayerState *ps) {
+    if (!__sync_lock_test_and_set(&s_surf_feedback_ready, 0)) return;
+    __sync_synchronize();
+    const char *mode = surf_mode_for(ps);
+    if (!mode || strcmp(mode, s_surf_feedback_mode)) return;
+    if (s_surf_result_selection) {
+        snprintf(s_surf_selected_source, sizeof s_surf_selected_source, "%s",
+                 s_surf_result_source);
+        snprintf(s_surf_selected_token, sizeof s_surf_selected_token, "%s",
+                 s_surf_result_token);
+        snprintf(s_surf_selected_mode, sizeof s_surf_selected_mode, "%s",
+                 mode);
+    }
+    hud_set_banner("Surf Live TV", s_surf_feedback_text,
+                   timing_get_us() + 3500000ULL);
+}
+
+static void surf_action(PlayerState *ps, const char *action) {
+    const char *mode = surf_mode_for(ps);
+    if (!mode || !action) return;
+    if (!__sync_bool_compare_and_swap(&s_surf_busy, 0, 1)) {
+        hud_set_banner("Surf Live TV", "Surf request is in progress",
+                       timing_get_us() + 2000000ULL);
+        return;
+    }
+    SurfActionJob *job = static_cast<SurfActionJob*>(malloc(sizeof(SurfActionJob)));
+    if (!job) {
+        __sync_lock_release(&s_surf_busy);
+        hud_set_banner("Surf Live TV", "Insufficient memory", timing_get_us() + 2000000ULL);
+        return;
+    }
+    memset(job, 0, sizeof *job);
+    snprintf(job->mode, sizeof job->mode, "%s", mode);
+    snprintf(job->action, sizeof job->action, "%s", action);
+    snprintf(job->trace, sizeof job->trace, "ps3_%08x_%08x",
+             (unsigned)timing_get_us(), (unsigned)ps->frame_count);
+    if (strcmp(s_surf_selected_mode, mode) != 0) {
+        s_surf_selected_source[0] = '\0';
+        s_surf_selected_token[0] = '\0';
+        snprintf(s_surf_selected_mode, sizeof s_surf_selected_mode, "%s", mode);
+    }
+    snprintf(job->source, sizeof job->source, "%s", s_surf_selected_source);
+    snprintf(job->previous_token, sizeof job->previous_token, "%s",
+             s_surf_selected_token);
+    if (!surf_proxy_url(mode, NULL, job->base_url, sizeof job->base_url)) {
+        free(job);
+        __sync_lock_release(&s_surf_busy);
+        hud_set_banner("Surf Live TV", "Surf server address unavailable",
+                       timing_get_us() + 3000000ULL);
+        return;
+    }
+    const size_t len = strlen(g_token);
+    job->token = static_cast<char*>(malloc(len + 1));
+    if (!job->token) {
+        free(job);
+        __sync_lock_release(&s_surf_busy);
+        hud_set_banner("Surf Live TV", "Authentication allocation failed",
+                       timing_get_us() + 2000000ULL);
+        return;
+    }
+    memcpy(job->token, g_token, len + 1);
+    sys_ppu_thread_t tid;
+    static char name[] = "jf_surf_ctl";
+    const int rc = sysThreadCreate(&tid, surf_action_worker, job,
+                                   1600, 0x10000, 0, name);
+    if (rc != 0) {
+        free(job->token);
+        free(job);
+        __sync_lock_release(&s_surf_busy);
+        hud_set_banner("Surf Live TV", "Cannot start Surf network worker",
+                       timing_get_us() + 3000000ULL);
+        return;
+    }
+    hud_set_banner("Surf Live TV", "Sending Surf request...",
+                   timing_get_us() + 1800000ULL);
+}
+
 enum { OPT_CHAPTERS, OPT_TRACKS, OPT_PICTURE, OPT_STATS, OPT_NEXT, OPT_PREV,
-       OPT_SKIP_INTRO, OPT_SKIP_CREDITS, OPT_MAX };
+       OPT_SKIP_INTRO, OPT_SKIP_CREDITS,
+       OPT_SURF_PAUSE, OPT_SURF_RESUME, OPT_SURF_FAVORITE,
+       OPT_SURF_PREVIOUS, OPT_SURF_FAVORITE_PREVIOUS, OPT_SURF_CURRENT,
+       OPT_SURF_STATUS, OPT_MAX };
 static int         s_opt_kind[OPT_MAX];
 static const char *s_opt_items[OPT_MAX];
 static const char *s_opt_vals[OPT_MAX];
@@ -187,6 +586,25 @@ void player_open_options(PlayerState *ps, int row) {
         s_opt_kind[n] = OPT_SKIP_CREDITS; s_opt_items[n] = TR("Skip Credits");
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s", tr(skip_mode_label(skip_credits_mode()))); n++;
     }
+    if (surf_mode_for(ps)) {
+        s_opt_kind[n] = OPT_SURF_PAUSE; s_opt_items[n] = "Pause Surf Looping";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Hold this channel"); n++;
+        s_opt_kind[n] = OPT_SURF_RESUME; s_opt_items[n] = "Resume Surf Looping";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Switch each minute"); n++;
+        s_opt_kind[n] = OPT_SURF_FAVORITE; s_opt_items[n] = "Favorite Current Channel";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Server source, not buffered picture"); n++;
+        s_opt_kind[n] = OPT_SURF_PREVIOUS; s_opt_items[n] = "Select Previous Channel";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
+                 s_surf_selected_source[0] ? s_surf_selected_source : "Cycle playable history"); n++;
+        s_opt_kind[n] = OPT_SURF_FAVORITE_PREVIOUS;
+        s_opt_items[n] = "Favorite Selected Previous";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
+                 s_surf_selected_source[0] ? s_surf_selected_source : "Select Previous first"); n++;
+        s_opt_kind[n] = OPT_SURF_CURRENT; s_opt_items[n] = "Select Current Channel";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Clear Previous selection"); n++;
+        s_opt_kind[n] = OPT_SURF_STATUS; s_opt_items[n] = "Show Surf Source Status";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Publisher state may lead screen"); n++;
+    }
     for (int i = 0; i < n; i++) s_opt_vals[i] = s_opt_valbuf[i];
     s_opt_n = n;
     ps->menu_kind = PLAYER_MENU_OPTIONS;
@@ -210,6 +628,13 @@ static HudAction options_select(PlayerState *ps, int sel) {
 #endif
     case OPT_SKIP_INTRO:   skip_intro_step(+1);   break;
     case OPT_SKIP_CREDITS: skip_credits_step(+1); break;
+    case OPT_SURF_PAUSE:   surf_action(ps,"pause");   break;
+    case OPT_SURF_RESUME:  surf_action(ps,"resume");  break;
+    case OPT_SURF_FAVORITE:          surf_action(ps,"favorite"); break;
+    case OPT_SURF_PREVIOUS:          surf_action(ps,"previous"); break;
+    case OPT_SURF_FAVORITE_PREVIOUS: surf_action(ps,"favorite_previous"); break;
+    case OPT_SURF_CURRENT:           surf_action(ps,"current"); break;
+    case OPT_SURF_STATUS:            surf_action(ps,"status"); break;
     default: return HUD_ACTION_NONE;
     }
     player_open_options(ps, sel);          // a setting: stay, on the same row
@@ -217,6 +642,7 @@ static HudAction options_select(PlayerState *ps, int sel) {
 }
 
 HudAction player_handle_menu_action(PlayerState *ps, HudAction act) {
+    surf_feedback_poll(ps);
     if (act == HUD_ACTION_MENU_SWITCH) {
         act = HUD_ACTION_NONE;
         if (ps->menu_kind == PLAYER_MENU_AUDIO && has_subs_menu(ps))       open_subs_menu(ps);

@@ -10,6 +10,25 @@ public: it froze on the Home screen on real hardware, ran out of memory at
 1080p, and had sign-in and update-check bugs (see 3.3.0 below). vortigauntlet's own release notes for 3.2.3
 and earlier are kept at the end, as he wrote them.
 
+## 3.6.3 (Surf PS3 fork, prerelease)
+
+- Native PS3 START/Options controller commands for Surf Pause, Resume, Favorite
+  Current, cycle Previous playable channels, Favorite Selected Previous,
+  cancel Previous selection and inspect server source status.
+- Favorite Previous uses CatalogService's 32-character selection token and exact
+  source identity; failures are surfaced rather than silently favoriting another
+  channel. The native network worker runs outside the video display loop.
+- Surf audio transition gating follows an observed server source change, a
+  detected change between decoded video pictures and completion of a PS3
+  display flip. A bounded 12-second fallback avoids permanently muted audio.
+  The 64-point luma scene detector is a heuristic; it cannot prove that a
+  picture belongs to a specific upstream source without a packet-level epoch.
+- Source, transition, selection, favorite results, video presentation and
+  recovery events are correlated through per-epoch traces in the PS3 log and
+  authenticated CatalogService telemetry. Existing standard playback is
+  unaffected when Surf is not selected.
+- Fork-specific update endpoint and host regression tests for the scene gate.
+
 ## 3.6.2
 
 - **Fixed: 480p would not play on newer Jellyfin servers**

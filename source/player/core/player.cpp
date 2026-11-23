@@ -39,6 +39,7 @@
 #include "player_hud.h"
 #include "player_picture.h"
 #include "player_internal.h"
+#include "surf_sync.h"
 #include "player_stats.h"
 #include "sub_overlay.h"
 #include "ui.h"
@@ -1515,6 +1516,11 @@ void show_player_run(const JFItem *item, u32 resume_secs,
     g_prog.guide_ready = false;
     s_live_next[0]     = '\0';
     snprintf(g_prog.item, sizeof g_prog.item, "%s", item->id);
+    const char *surf_item_name = (live && item) ? item->name : "";
+    snprintf(g_prog.surf_mode, sizeof g_prog.surf_mode, "%s",
+             !strcmp(surf_item_name, "Surf: All Channels") ? "all" :
+             !strcmp(surf_item_name, "Surf: Sports") ? "sports" :
+             !strcmp(surf_item_name, "Surf: Movies & Series") ? "movies-series" : "");
     snprintf(g_prog.sess, sizeof g_prog.sess, "%s", ps.session_id);
     snprintf(g_prog.live_id, sizeof g_prog.live_id, "%s", live ? ps.source.live_stream_id : "");
     g_prog.base_us   = ps.play_base_us;
@@ -1522,6 +1528,7 @@ void show_player_run(const JFItem *item, u32 resume_secs,
     g_prog.pos_valid = true;
     __sync_synchronize();
     g_prog.playing   = ps.playing;
+    surf_sync_session(g_prog.surf_mode, g_prog.gen);
     sys_ppu_thread_t prog_tid = 0;
     if (ps.playing && (!local || local->net)) {
         int trc = sysThreadCreate(&prog_tid, progress_thread_fn,
@@ -1590,7 +1597,9 @@ void show_player_run(const JFItem *item, u32 resume_secs,
         // no flip pending, and an unbounded wait then froze playback on a
         // black screen for good (hardware, 2026-09-27).  A normal flip lands
         // within one vblank, so 250 ms only ever fires in that case.
-        if (flip_queued && !waitflip_timeout(250000)) {
+        const bool flip_done = !flip_queued || waitflip_timeout(250000);
+        if (flip_queued) surf_sync_flip_completed(flip_done);
+        if (flip_queued && !flip_done) {
             static bool s_logged = false;
             if (!s_logged) { plog("player: flip wait timed out; continuing"); s_logged = true; }
         }
@@ -1857,6 +1866,12 @@ void show_player_run(const JFItem *item, u32 resume_secs,
             snprintf(g_prog.sess, sizeof g_prog.sess, "%s", ps.session_id);
             if (live) {
                 snprintf(g_prog.item, sizeof g_prog.item, "%s", item->id);
+    const char *surf_item_name = (live && item) ? item->name : "";
+    snprintf(g_prog.surf_mode, sizeof g_prog.surf_mode, "%s",
+             !strcmp(surf_item_name, "Surf: All Channels") ? "all" :
+             !strcmp(surf_item_name, "Surf: Sports") ? "sports" :
+             !strcmp(surf_item_name, "Surf: Movies & Series") ? "movies-series" : "");
+                surf_sync_session(g_prog.surf_mode, g_prog.gen);
                 snprintf(g_prog.live_id, sizeof g_prog.live_id, "%s", ps.source.live_stream_id);
                 live_watch_opened(&live_w, timing_get_us());
                 if (seek_ok && live_changed) { live_hud_channel(&live_ch, live_utc); live_banner(&live_ch, live_utc); }
@@ -1930,6 +1945,7 @@ void show_player_run(const JFItem *item, u32 resume_secs,
         if (s_audio_hold && (s_vid_frame_ready || ps.frame_count > 0 ||
                              timing_get_us() - audio_hold_us > 3000000ULL))
             s_audio_hold = false;
+        surf_sync_display_tick(ps.paused);
         player_display_frame(&ps);
         hud_scrub_bar_gpu();
         {
@@ -1975,10 +1991,13 @@ void show_player_run(const JFItem *item, u32 resume_secs,
             }
         }
 
+        if (g_prog.surf_mode[0] && ps.frame_count > 0)
+            surf_sync_flip_queued(s_vid_uploaded_seq, jbuf_peek_pts_us());
         flip();
         flip_queued = true;
     }
 
+    surf_sync_stop();
     crash_log("p11 loop exit");
     {
         char buf[96];

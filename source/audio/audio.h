@@ -13,6 +13,10 @@ bool audio_write_pcm(void);  // returns true if a DMA event was consumed
 // writer back at its old distance from the hardware on resume.  Call from
 // the thread that calls audio_write_pcm(), on each change of state.
 void audio_pause_output(bool paused);
+// Surf only: suppress PCM into the DMA ring during a source transition while
+// keeping the audio clock running. Do not gate compressed IEC passthrough.
+void audio_set_transition_gate(bool gated);
+bool audio_transition_gate_active(void);
 
 // Paced mode (the music player): audio_write_pcm() never waits for the
 // source.  Each wake tops the ring up to

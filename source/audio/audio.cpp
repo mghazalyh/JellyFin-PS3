@@ -41,6 +41,21 @@ static u64               s_read_idx_ea = 0;
 static volatile u64 s_audio_blocks = 0;
 static u32          s_pcm_blocks   = 0;
 static u32          s_sil_blocks   = 0;
+static volatile bool s_transition_gate = false;
+void audio_set_transition_gate(bool gated) {
+    // A new gate invalidates the short PCM runway already queued to hardware.
+    // The ordinary audio writer sees the gate before its next DMA block.
+    const bool was = s_transition_gate;
+    s_transition_gate = gated;
+    __sync_synchronize();
+    if (gated && !was && s_audio_ok && s_data_start &&
+        s_num_blocks && !audio_passthrough_active()) {
+        memset((void*)(uintptr_t)s_data_start, 0,
+               (size_t)s_num_blocks * s_port_channels *
+               AUDIO_BLOCK_SAMPLES * sizeof(float));
+    }
+}
+bool audio_transition_gate_active(void) { return s_transition_gate; }
 
 u64 audio_block_count(void) { return s_audio_blocks; }
 
@@ -438,6 +453,11 @@ bool audio_write_pcm(void) {
                 plog(b);
             }
         }
+        // The source decoder still advances time, but audio cannot escape
+        // before a confirmed new-picture flip. Do not corrupt IEC bursts.
+        if (s_transition_gate && !audio_passthrough_active()) {
+            memset(blk_buf, 0, s_port_channels * AUDIO_BLOCK_SAMPLES * sizeof(float));
+        }
         // Per-channel peak of the block we just handed to the DMA engine —
         // the last point the app can observe its own audio.  This is what
         // answers "is the centre channel silent, or is the chain not playing
@@ -488,6 +508,7 @@ bool audio_write_pcm(void) {
 }
 
 void audio_close(void) {
+    s_transition_gate = false;
     crash_log("ax1 audio_close enter");
     // A video open suspended the menu sounds; bring them back however that
     // open went (a no-op after music, which never suspends them).

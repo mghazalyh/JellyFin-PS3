@@ -19,6 +19,7 @@
 #include "ts_demux.h"   // PesStats — PES truncation telemetry
 #include "timing.h"
 #include "player_internal.h"
+#include "surf_sync.h"
 #include "player_stats.h"
 #include "jellyfin_api.h"
 #include "api_livetv.h"
@@ -503,7 +504,54 @@ ProgressShared g_prog;
 
 // What is on `channel` now and next, for the player bar.  A server with no
 // guide for it publishes nothing and the bar keeps what the channel list said.
+static bool surf_guide_url(char *out, size_t cap) {
+    if (!g_prog.surf_mode[0] || !g_server[0]) return false;
+    const char *host = strstr(g_server, "://");
+    if (!host) return false;
+    host += 3;
+    const char *end = strchr(host, '/');
+    if (!end) end = host + strlen(host);
+    const char *bracket = static_cast<const char*>(memchr(host, ']', (size_t)(end - host)));
+    const char *host_end = end;
+    for (const char *p = host; p < end; p++)
+        if (*p == ':' && (!bracket || p > bracket)) { host_end = p; break; }
+    const int len = (int)(host_end - host);
+    if (len <= 0 || len > 180) return false;
+    const int n = snprintf(out, cap, "http://%.*s:8097/api/surf/%s",
+                           len, host, g_prog.surf_mode);
+    return n > 0 && (size_t)n < cap;
+}
+
 static void live_guide_fetch(const char *channel, u32 gen) {
+    if (g_prog.surf_mode[0]) {
+        char url[320], json[8192], source[152] = "", group[72] = "";
+        if (!surf_guide_url(url, sizeof url)) return;
+        const int status = http_request(HTTP_GET, url, NULL, g_token, json, sizeof json);
+        if (status != 200 || !json_get_string(json, "source", source, sizeof source) || !source[0])
+            return;
+        json_get_string(json, "group", group, sizeof group);
+        char source_id[192] = "", boot[56] = "", state[24] = "";
+        json_get_string(json, "source_id", source_id, sizeof source_id);
+        json_get_string(json, "boot", boot, sizeof boot);
+        json_get_string(json, "state", state, sizeof state);
+        if (running && g_prog.gen == gen && g_prog.playing &&
+            !strcmp(state, "playing")) {
+            // Candidates and stalled/starting sources must not trigger an
+            // audio transition or become Favorites.
+            surf_sync_observe_source(g_prog.surf_mode, source, source_id, boot, gen);
+        }
+        if (running && g_prog.gen == gen && g_prog.playing && !g_prog.guide_ready) {
+            snprintf(g_prog.guide_channel, sizeof g_prog.guide_channel, "%s", channel);
+            snprintf(g_prog.guide_now, sizeof g_prog.guide_now, "%s", source);
+            g_prog.guide_next[0] = 0;
+            g_prog.guide_now_start = 0;
+            g_prog.guide_now_end = 0;
+            __sync_synchronize();
+            g_prog.guide_ready = true;
+        }
+        return;
+    }
+
     JFProgram *p = (JFProgram *)malloc(LIVE_GUIDE_PROGRAMMES * sizeof(JFProgram));
     if (!p) return;
     const uint64_t now = jf_now_ticks();
@@ -522,6 +570,39 @@ static void live_guide_fetch(const char *channel, u32 gen) {
         g_prog.guide_ready = true;
     }
     free(p);
+}
+
+// The progress worker is the only thread that posts native A/V telemetry.
+// A bounded queue prevents network calls from touching audio or render loops.
+static void surf_post_sync_event(const SurfSyncEvent *evt) {
+    if (!evt || !g_token[0]) return;
+    char base[320], url[356];
+    if (!surf_guide_url(base, sizeof base)) return;
+    const int n = snprintf(url, sizeof url, "%s/telemetry", base);
+    if (n < 0 || (size_t)n >= sizeof url) return;
+    char source[306] = "";
+    size_t used = 0;
+    for (const unsigned char *src = (const unsigned char*)evt->source; *src; ++src) {
+        if (used + 3 >= sizeof source) break;
+        if (*src == '"' || *src == '\\') {
+            source[used++] = '\\'; source[used++] = (char)*src;
+        } else if (*src >= 32 && *src != 127) {
+            source[used++] = (char)*src;
+        }
+    }
+    source[used] = '\0';
+    char body[580], reply[192];
+    snprintf(body, sizeof body,
+             "{\"event\":\"%s\",\"source\":\"%s\",\"trace\":\"%s\","
+             "\"status_state\":\"%s\"}",
+             evt->event, source, evt->trace, evt->state);
+    const int rc = http_request(HTTP_POST, url, body, g_token, reply, sizeof reply);
+    if (rc != 200) {
+        char logline[115];
+        snprintf(logline, sizeof logline, "surf_sync: telemetry rejected event=%s http=%d",
+                 evt->event, rc);
+        plog(logline);
+    }
 }
 
 void progress_thread_fn(void *arg) {
@@ -544,6 +625,11 @@ void progress_thread_fn(void *arg) {
     while (PROG_LIVE()) {
         usleep(250000);              // 250 ms granularity for a quick exit
         if (!PROG_LIVE()) break;
+        if (g_prog.surf_mode[0]) {
+            SurfSyncEvent evt;
+            if (surf_sync_take_event(&evt) && PROG_LIVE())
+                surf_post_sync_event(&evt);
+        }
         // Decode-thread watchdog: no progress for 2 s -> say where it is.
         if (!g_prog.paused && g_prog.pos_valid) {
             const u32 it = g_dec_iter;
@@ -558,7 +644,7 @@ void progress_thread_fn(void *arg) {
             } else { wd_iter = it; wd_still = 0; }
         }
         if (g_prog.live && g_prog.pos_valid && !g_prog.guide_ready &&
-            (++guide_wait >= LIVE_GUIDE_EVERY_TICKS || strcmp(guide_item, g_prog.item) != 0)) {
+            (++guide_wait >= (g_prog.surf_mode[0] ? 4 : LIVE_GUIDE_EVERY_TICKS) || strcmp(guide_item, g_prog.item) != 0)) {
             guide_wait = 0;
             snprintf(guide_item, sizeof guide_item, "%s", g_prog.item);
             live_guide_fetch(guide_item, gen);
@@ -612,6 +698,10 @@ void upload_thread_fn(void *arg) {
         sysMutexUnlock(s_jbuf_mtx);
 
         if (!slot_a) { usleep(1000); continue; }
+        if (g_prog.surf_mode[0]) {
+            surf_sync_probe_video(slot_a, jbuf_fw(), jbuf_fh(),
+                                  seq_a, jbuf_peek_pts_us());
+        }
 
         __asm__ volatile("sync" ::: "memory");
         int back = s_vid_disp_idx ^ 1;

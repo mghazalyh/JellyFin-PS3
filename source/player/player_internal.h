@@ -62,6 +62,7 @@ struct ProgressShared {
     char          item[64];
     char          sess[64];
     char          live_id[128]; // Live TV: the opened stream, "" otherwise (98 chars)
+    char          surf_mode[16]; // all, sports, movies-series; otherwise empty
     // Live TV: what is on now and next, fetched by the reporter so the display
     // never waits on the network.  It fills these only while guide_ready is
     // false and sets it last; the display loop reads them and clears it.

@@ -1,0 +1,27 @@
+name: Publish PS3 Surf package
+on:
+  push:
+    tags:
+      - "v3.6.3-surf.*"
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out verified Surf build
+        uses: actions/checkout@v4
+      - name: Verify package identity and SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s release/JellyFin-PS3.pkg
+          sha256sum -c release/JellyFin-PS3.pkg.sha256
+          python3 -c 'import struct,pathlib; p=pathlib.Path("release/JellyFin-PS3.pkg"); b=p.read_bytes(); assert b[:4] == bytes.fromhex("7f504b47"); assert struct.unpack_from(">Q",b,0x18)[0]==len(b); assert struct.unpack_from(">I",b,4)[0] & 0x80000000; print("PS3 finalized package header and length validated")'
+      - name: Publish beta GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" release/JellyFin-PS3.pkg release/JellyFin-PS3.pkg.sha256 --repo "$GITHUB_REPOSITORY" --title "JellyFin PS3 Surf 3.6.3 (beta)" --notes-file docs/surf-release-notes.md --prerelease --verify-tag
