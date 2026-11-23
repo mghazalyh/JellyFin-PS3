@@ -108,8 +108,9 @@ static inline bool jf_remote_parse(const char *src, size_t len,
 }
 
 static inline bool jf_remote_auth_matches(const char *actual, const char *provided) {
-    if (!actual || !provided) return false;
-    // Call only with two already validated 64-digit ASCII secrets.
+    if (!actual || !provided || strlen(actual) != 64 || strlen(provided) != 64)
+        return false;
+    // Lengths validated; compare all bytes without an early mismatch exit.
     unsigned int mismatch = 0;
     for (size_t i = 0; i < 64; ++i)
         mismatch |= (unsigned char)actual[i] ^ (unsigned char)provided[i];
