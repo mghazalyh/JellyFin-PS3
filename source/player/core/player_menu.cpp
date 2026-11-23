@@ -94,11 +94,14 @@ static bool has_audio_menu(const PlayerState *ps) { return ps->have_tracks && ps
 static bool has_subs_menu(const PlayerState *ps)  { return ps->have_tracks && ps->tracks.n_subs  > 0; }
 
 static void open_audio_menu(PlayerState *ps) {
-    const char *items[JF_MAX_AUDIO];
-    for (int i = 0; i < ps->tracks.n_audio; i++)
+    const char *items[JF_MAX_AUDIO] = {};
+    const int count = ps->tracks.n_audio < JF_MAX_AUDIO
+                    ? ps->tracks.n_audio : JF_MAX_AUDIO;
+    if (count <= 0) return;
+    for (int i = 0; i < count; i++)
         items[i] = ps->tracks.audio[i].label;
     ps->menu_kind = PLAYER_MENU_AUDIO;
-    hud_open_menu(TR("Audio"), items, ps->tracks.n_audio, ps->cur_audio);
+    hud_open_menu(TR("Audio"), items, count, ps->cur_audio);
     if (has_subs_menu(ps)) hud_set_menu_switch(TRN("Subtitles"));
 }
 
@@ -180,8 +183,11 @@ struct SurfActionJob {
     char trace[32];
     u32 generation;
     u32 menu_epoch;
-    char *token;
+    char token[256]; // fixed-size authenticated copy, no per-click malloc
 };
+
+// A single detached worker owns this until it clears s_surf_busy.
+static SurfActionJob s_surf_job;
 
 static volatile int s_surf_busy = 0;
 static volatile int s_surf_feedback_ready = 0;
@@ -313,7 +319,7 @@ static void surf_action_worker(void *arg) {
     bool new_selection = false;
     bool selected_valid = false;
     int status = 0;
-    bool valid = job && job->token && job->base_url[0];
+    bool valid = job && job->token[0] && job->base_url[0];
     const bool previous = valid && !strcmp(job->action, "previous");
     const bool favorite_previous = valid && !strcmp(job->action, "favorite_previous");
     const bool favorite_current = valid && !strcmp(job->action, "favorite");
@@ -432,9 +438,8 @@ static void surf_action_worker(void *arg) {
                  job->mode);
         s_surf_feedback_generation = job->generation;
         s_surf_feedback_menu_epoch = job->menu_epoch;
-        free(job->token);
-        job->token = NULL;
-        free(job);
+        // Clear the duplicate authentication data before allowing reuse.
+        memset(job->token, 0, sizeof job->token);
     }
     snprintf(s_surf_feedback_text, sizeof s_surf_feedback_text, "%s", result);
     snprintf(s_surf_result_source, sizeof s_surf_result_source, "%s",
@@ -477,12 +482,7 @@ static void surf_action(PlayerState *ps, const char *action) {
                        timing_get_us() + 2000000ULL);
         return;
     }
-    SurfActionJob *job = static_cast<SurfActionJob*>(malloc(sizeof(SurfActionJob)));
-    if (!job) {
-        __sync_lock_release(&s_surf_busy);
-        hud_set_banner("Surf Live TV", "Insufficient memory", timing_get_us() + 2000000ULL);
-        return;
-    }
+    SurfActionJob *job = &s_surf_job;
     memset(job, 0, sizeof *job);
     snprintf(job->mode, sizeof job->mode, "%s", mode);
     snprintf(job->action, sizeof job->action, "%s", action);
@@ -499,29 +499,24 @@ static void surf_action(PlayerState *ps, const char *action) {
     snprintf(job->previous_token, sizeof job->previous_token, "%s",
              s_surf_selected_token);
     if (!surf_proxy_url(mode, NULL, job->base_url, sizeof job->base_url)) {
-        free(job);
         __sync_lock_release(&s_surf_busy);
         hud_set_banner("Surf Live TV", "Surf server address unavailable",
                        timing_get_us() + 3000000ULL);
         return;
     }
-    const size_t len = strlen(g_token);
-    job->token = static_cast<char*>(malloc(len + 1));
-    if (!job->token) {
-        free(job);
+    snprintf(job->token, sizeof job->token, "%s", g_token);
+    if (!job->token[0]) {
         __sync_lock_release(&s_surf_busy);
-        hud_set_banner("Surf Live TV", "Authentication allocation failed",
+        hud_set_banner("Surf Live TV", "Jellyfin authentication unavailable",
                        timing_get_us() + 2000000ULL);
         return;
     }
-    memcpy(job->token, g_token, len + 1);
     sys_ppu_thread_t tid;
     static char name[] = "jf_surf_ctl";
     const int rc = sysThreadCreate(&tid, surf_action_worker, job,
                                    1600, 0x10000, 0, name);
     if (rc != 0) {
-        free(job->token);
-        free(job);
+        memset(job->token, 0, sizeof job->token);
         __sync_lock_release(&s_surf_busy);
         hud_set_banner("Surf Live TV", "Cannot start Surf network worker",
                        timing_get_us() + 3000000ULL);

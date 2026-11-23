@@ -27,6 +27,11 @@ int main(void) {
     assert(!surf_json_array_end("]"));
     assert(!surf_json_array_end("[{\"name\":\"unclosed\"}"));
     assert(!surf_json_array_end("[{\"name\":\"unclosed}]"));
+    for (unsigned i = 0; i < 100000; ++i) {
+        assert(surf_seq_reached(i + 1u, i));
+        assert(!surf_seq_reached(i - 1u, i));
+        assert(!surf_cut_detect(flat, small, 64, NULL, NULL));
+    }
     puts("Surf scene gate and JSON history scanner tests passed");
     return 0;
 }

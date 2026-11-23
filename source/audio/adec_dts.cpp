@@ -103,6 +103,12 @@ static void dts_packet(void *user, const uint8_t *pkt, int len) {
         }
         return;
     }
+    // The decoder validates this today; enforce the bound at the output
+    // boundary too, before indexing the fixed eight-channel planar array.
+    if (ch < 1 || ch > DCAHD_MAX_CHANNELS) {
+        plog("adec_dts: invalid channel count, dropping frame");
+        return;
+    }
     s_hd_consec_err = 0;
     s_hd_frames++;
     s_hd_lossless = lossless != 0;
@@ -147,11 +153,15 @@ static void dts_packet(void *user, const uint8_t *pkt, int len) {
     // Map in DMA-block-sized chunks rather than one big buffer: a frame can be
     // thousands of samples, and 256 frames is exactly what the ring wants.
     const int32_t *const *planes = dcahd_api_planes(s_hd);
+    if (!planes) {
+        plog("adec_dts: decoder planes unavailable");
+        return;
+    }
     static float stage[256 * 8];           // adec thread only — no reentry
-    const int32_t *slice[DCAHD_MAX_CHANNELS];
+    const int32_t *slice[DCAHD_MAX_CHANNELS] = {};
     for (int off = 0; off < n; off += 256) {
         int take = (n - off < 256) ? (n - off) : 256;
-        for (int c = 0; c < ch && c < DCAHD_MAX_CHANNELS; c++)
+        for (int c = 0; c < ch; c++)
             slice[c] = planes[c] + off;
         truehd_map_block_planar(slice, ch, take, &s_hd_map, stage);
         adec_push_frames(stage, take);

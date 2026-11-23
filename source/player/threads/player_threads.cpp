@@ -451,7 +451,7 @@ void decode_thread_fn(void *arg) {
 
             snprintf(buf, sizeof(buf),
                 "hb: fr=%d q=%d au=%u ab=%llu stalls=%ld max=%ldms avg=%ldms fps=%.1f aumax=%d ring=%d/%d pcm=%d net=%.1fM rxw=%d%% adt=%d%% adn=%u pes=%u/%uk pd=%u/%u/%u lvl=%s",
-                *frame_count, jbuf_count(), s_au_submitted,
+                *frame_count, jbuf_count(), (unsigned)s_au_submitted,
                 (unsigned long long)audio_block_count(),
                 stall_ep_count, stall_ep_dur_max_us / 1000, avg_ms,
                 display_fps, s_au_inflight_max, s_ring_n, s_ring_cap,

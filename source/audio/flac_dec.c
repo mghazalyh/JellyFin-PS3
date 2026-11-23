@@ -1,6 +1,7 @@
 // FLAC frame decoder: see flac_dec.h.
 
 #include "flac_dec.h"
+#include "flac_sign.h"
 
 #include <string.h>
 
@@ -52,9 +53,11 @@ static uint32_t br_get(Br *b, int n) {
 }
 
 static int32_t br_signed(Br *b, int n) {
-    if (n <= 0) return 0;
-    const uint32_t v = br_get(b, n);
-    return (int32_t)(v << (32 - n)) >> (32 - n);
+    if (!b || n < 1 || n > 32) {
+        if (b) b->over = 1;
+        return 0;
+    }
+    return flac_sign_extend(br_get(b, n), (unsigned)n);
 }
 
 // zero bits before the next 1, which is consumed
