@@ -355,3 +355,6 @@ void vid_gpu_draw(bool render_blend, float blend_factor, u32 fw, u32 fh);
 // reopen's stream_open wait callback that draws it (Circle cancels).
 void player_spinner_gpu(float t);
 bool player_seek_wait(unsigned elapsed_ms);
+
+// Schedules an authenticated Surf action on the existing asynchronous worker.
+bool player_remote_surf_action(PlayerState *ps, const char *action, const char *id);
