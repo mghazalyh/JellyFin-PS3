@@ -94,6 +94,34 @@ class SupervisorTests(unittest.TestCase):
             self.assertFalse(saved["push_performed"])
             self.assertFalse(saved["deployment_performed"])
 
+    def test_opencode_jsonl_must_have_answer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log = pathlib.Path(folder) / "output.jsonl"
+            log.write_text('{"type":"text","part":{"type":"text","text":"Verified."}}\n',
+                           encoding="utf-8")
+            self.assertEqual(h.read_opencode_result(log)["answer_parts"], 1)
+            log.write_text('{"type":"step_start","part":{"type":"step-start"}}\n',
+                           encoding="utf-8")
+            with self.assertRaises(h.HarnessError):
+                h.read_opencode_result(log)
+            log.write_text('{"type":"error","message":"network failure"}\n',
+                           encoding="utf-8")
+            with self.assertRaises(h.HarnessError):
+                h.read_opencode_result(log)
+            log.write_text("non-json\n", encoding="utf-8")
+            with self.assertRaises(h.HarnessError):
+                h.read_opencode_result(log)
+
+    def test_open_code_allowlist(self):
+        self.assertEqual(h.changed_paths(" M source/player/remote_mailbox.cpp\n"),
+                         ["source/player/remote_mailbox.cpp"])
+        with self.assertRaises(h.HarnessError):
+            h.changed_paths(" M source/audio/audio.cpp\n")
+        with self.assertRaises(h.HarnessError):
+            h.changed_paths("?? .github/workflows/ps3-audited-release.yml\n")
+        with self.assertRaises(h.HarnessError):
+            h.changed_paths("?? source/player/../../.env\n")
+
     def test_independent_validation_fail_is_not_a_pass(self):
         with tempfile.TemporaryDirectory() as folder:
             base = pathlib.Path(folder)
