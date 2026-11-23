@@ -28,6 +28,7 @@ static u32 s_result_generation = 0;
 static char s_secret[65] = "";
 static bool s_sample_initialized = false;
 static volatile u32 s_metric_drops = 0;
+static JfRemoteReplay s_recent_ids = {};
 static u64 s_command_started_us = 0;
 
 static void lock_state(void) {
@@ -171,6 +172,11 @@ void jf_remote_tick(u32 generation, const char *mode, bool playing,
                        !strcmp(request.action, "capture_metrics");
     if (!query && (request.generation == 0 || request.generation != generation)) {
         write_result(request.id, false, "playback generation mismatch",
+                     generation, mode, free_kb, queue_depth);
+        return;
+    }
+    if (!jf_remote_record_id(&s_recent_ids, request.id)) {
+        write_result(request.id, false, "replayed command id",
                      generation, mode, free_kb, queue_depth);
         return;
     }
