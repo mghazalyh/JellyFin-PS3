@@ -37,7 +37,7 @@ ALLOWED_ACTIONS = frozenset({
 HEX16 = re.compile(r"^[0-9a-f]{16}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-SAFE_VALUE = re.compile(r"^[A-Za-z0-9 _.,:+/@]{0,160}$")
+SAFE_VALUE = re.compile(r"^[A-Za-z0-9 _.,:+/@-]{0,160}$")
 
 
 class MailboxError(RuntimeError):
@@ -237,8 +237,8 @@ class PS3Mailbox:
             "player_log.txt": "/dev_hdd0/tmp/player_log.txt",
             "player_log.prev.txt": "/dev_hdd0/tmp/player_log.prev.txt",
             "remote_response.txt": RESPONSE_PATH,
-            "remote_metrics.bin": REMOTE_DIR + "/metrics.bin",
-            "remote_metrics.prev.bin": REMOTE_DIR + "/metrics.prev.bin",
+            "remote_metrics.bin": "/dev_hdd0/tmp/jf_metrics.bin",
+            "remote_metrics.prev.bin": "/dev_hdd0/tmp/jf_metrics.prev.bin",
         }
         for local_name, remote_name in names.items():
             output = destination / local_name
@@ -333,7 +333,7 @@ def cli(argv: Optional[list[str]] = None) -> int:
             elif args.command == "collect":
                 print(json.dumps(mailbox.collect(args.output), indent=2))
         return 0
-    except (MailboxError, OSError, ftplib.all_errors) as exc:
+    except (MailboxError,) + ftplib.all_errors as exc:
         print(f"ps3-harness: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
