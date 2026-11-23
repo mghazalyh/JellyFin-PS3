@@ -113,7 +113,15 @@ python tools/ps3_unattended.py send pause_surf --generation 123 --secret-file C:
 python tools/ps3_unattended.py collect --output C:\Jellyfin-Remote\ps3_logs_next
 python tools/ps3_unattended.py analyze C:\Jellyfin-Remote\ps3_logs_20261123\surf_hls.events.jsonl
 python tools/ps3_unattended.py metrics C:\Jellyfin-Remote\ps3_logs_next\remote_metrics.bin
+python tools/ps3_unattended.py soak --secret-file C:\Jellyfin-Remote\ps3_mailbox.secret --output C:\Jellyfin-Remote\ps3_soak_next --duration 600 --interval 30
 \`\`\`
+
+The `soak` command records periodic bounded snapshots (default: ten minutes,
+one snapshot per thirty seconds), collects the logs and summarizes memory drift
+when playback finishes. It does not favorite channels, change Surf mode or
+stop playback. The optional `--exercise-controls` flag performs one
+pause/resume cycle and attempts to restore resume state on failure. The
+session generation and virtual-channel mode must remain unchanged.
 
 Use the actual generation returned by get_status instead of the example 123.
 Do not run \`pair\` while the existing key is in use. The controller refuses to
