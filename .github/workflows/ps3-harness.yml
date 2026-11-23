@@ -18,6 +18,10 @@ on:
       - '.github/workflows/ps3-harness.yml'
   workflow_dispatch:
 
+concurrency:
+  group: ps3-unattended-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
