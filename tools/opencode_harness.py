@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -71,6 +72,24 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def stop_process_tree(proc: subprocess.Popen) -> None:
+    """Terminate OpenCode and its child processes, not just its CLI wrapper."""
+    if proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=10, check=False)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError, ProcessLookupError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def run(argv: list[str], cwd: Path, timeout: int, log: Path,
         max_output: int = MAX_OUTPUT) -> dict[str, object]:
     if timeout < 1 or max_output < 1:
@@ -84,12 +103,15 @@ def run(argv: list[str], cwd: Path, timeout: int, log: Path,
         with log.open("wb") as out, stderr.open("wb") as err:
             # No shell: arguments are never interpolated as commands.
             proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=err, shell=False)
+                                    stdout=out, stderr=err, shell=False,
+                                    creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+                                                   if os.name == "nt" else 0),
+                                    start_new_session=(os.name != "nt"))
             deadline = start + timeout
             while proc.poll() is None:
                 if (log.stat().st_size + stderr.stat().st_size) > max_output:
                     reason = "output_limit"
-                    proc.kill()
+                    stop_process_tree(proc)
                     break
                 if time.monotonic() >= deadline:
                     reason = "timeout"
@@ -99,7 +121,7 @@ def run(argv: list[str], cwd: Path, timeout: int, log: Path,
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                stop_process_tree(proc)
                 proc.wait()
     except (OSError, subprocess.SubprocessError) as exc:
         reason = "process_error:" + type(exc).__name__
@@ -179,7 +201,7 @@ def git_check(repo: Path, logdir: Path, timeout: int = 15) -> tuple[str, str]:
     branch = git("branch", "--show-current")
     if not branch.startswith(ALLOWED_BRANCH_PREFIX):
         raise HarnessError("refusing unsafe branch: " + branch)
-    status = git("status", "--porcelain")
+    status = git("status", "--porcelain=v1", "--untracked-files=all")
     return branch, status
 
 
