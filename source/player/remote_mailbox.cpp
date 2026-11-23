@@ -1,6 +1,7 @@
 // Opt-in PS3 FTP mailbox and compact local diagnostics.
 // No filesystem I/O is performed by display, decoder, or audio threads.
 #include "remote_mailbox.h"
+#include "timing.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -26,7 +27,6 @@ static bool s_success = false;
 static u32 s_result_generation = 0;
 static char s_secret[65] = "";
 static bool s_sample_initialized = false;
-static u32 s_last_sample_gen = 0;
 
 static void lock_state(void) {
     while (!__sync_bool_compare_and_swap(&s_lock, 0, 1))
@@ -204,7 +204,6 @@ void jf_remote_sample(u32 generation, u32 free_kb, u32 queue_depth,
         }
         s_sample_initialized = true;
     }
-    if (generation != s_last_sample_gen) s_last_sample_gen = generation;
     struct stat st;
     if (stat(JF_METRICS_PATH, &st) == 0 && st.st_size >= JF_METRICS_MAX) {
         remove(JF_METRICS_PREV);
@@ -216,7 +215,7 @@ void jf_remote_sample(u32 generation, u32 free_kb, u32 queue_depth,
     const uint32_t record[8] = {
         0x4a464d31U, (uint32_t)(generation), (uint32_t)free_kb,
         (uint32_t)queue_depth, (uint32_t)audio_clock_ms, (uint32_t)flags,
-        (uint32_t)(playing ? 0 : 0), 0U
+        (uint32_t)(timing_get_us() / 1000ULL), 0U
     };
     fwrite(record, sizeof record, 1, f);
     fclose(f);
