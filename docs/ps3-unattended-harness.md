@@ -112,6 +112,7 @@ python tools/ps3_unattended.py send get_status --secret-file C:\Jellyfin-Remote\
 python tools/ps3_unattended.py send pause_surf --generation 123 --secret-file C:\Jellyfin-Remote\ps3_mailbox.secret
 python tools/ps3_unattended.py collect --output C:\Jellyfin-Remote\ps3_logs_next
 python tools/ps3_unattended.py analyze C:\Jellyfin-Remote\ps3_logs_20261123\surf_hls.events.jsonl
+python tools/ps3_unattended.py metrics C:\Jellyfin-Remote\ps3_logs_next\remote_metrics.bin
 \`\`\`
 
 Use the actual generation returned by get_status instead of the example 123.
