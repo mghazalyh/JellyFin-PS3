@@ -140,6 +140,35 @@ class HarnessTests(unittest.TestCase):
             self.assertTrue((pathlib.Path(tmp) / "crash_log.txt").exists())
             self.assertFalse((pathlib.Path(tmp) / "player_log.txt").exists())
 
+    def test_binary_metrics_big_endian_and_wrap(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log = pathlib.Path(folder) / "jf_metrics.bin"
+            wire = h.METRIC_WIRE
+            rows = [
+                (h.METRIC_MAGIC, 7, 15000, 4, 250, 0, 0xfffffffe, 0),
+                (h.METRIC_MAGIC, 7, 14800, 2, 550, 1, 5, 0),
+                (h.METRIC_MAGIC, 7, 14900, 1, 850, 2, 100, 0),
+                (h.METRIC_MAGIC, 8, 20000, 0, 5, 0, 200, 0),
+            ]
+            log.write_bytes(b"".join(wire.pack(*row) for row in rows))
+            report = h.analyze_metrics([log])
+            self.assertEqual(report["total_samples"], 4)
+            self.assertEqual(report["malformed_records"], 0)
+            session = report["sessions"]["7"]
+            self.assertEqual(session["samples"], 3)
+            self.assertEqual(session["min_free_kb"], 14800)
+            self.assertEqual(session["free_memory_delta_kb"], -100)
+            self.assertEqual(session["elapsed_observed_ms"], 102)
+            self.assertEqual(session["paused_samples"], 1)
+            self.assertEqual(session["forced_samples"], 1)
+            self.assertEqual(report["sessions"]["8"]["samples"], 1)
+            log.write_bytes(log.read_bytes() + b"BAD")
+            report = h.analyze_metrics([log])
+            self.assertEqual(report["truncated_trailing_bytes"], 3)
+            with self.assertRaises(h.MailboxError):
+                log.write_bytes(b"x" * (h.MAX_ARCHIVE_BYTES + 1))
+                h.analyze_metrics([log])
+
     def test_streaming_offline_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "surf.events.jsonl"
