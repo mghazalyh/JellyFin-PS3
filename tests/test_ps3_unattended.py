@@ -135,10 +135,12 @@ class HarnessTests(unittest.TestCase):
         fake.files["/dev_hdd0/tmp/player_log.txt"] = b"A" * (h.MAX_ARCHIVE_BYTES + 1)
         with tempfile.TemporaryDirectory() as tmp:
             with h.PS3Mailbox("127.0.0.1", ftp_factory=lambda: fake) as controller:
-                with self.assertRaises(h.MailboxError):
-                    controller.collect(pathlib.Path(tmp))
+                report = controller.collect(pathlib.Path(tmp))
             self.assertTrue((pathlib.Path(tmp) / "crash_log.txt").exists())
             self.assertFalse((pathlib.Path(tmp) / "player_log.txt").exists())
+            self.assertTrue((pathlib.Path(tmp) / "manifest.json").exists())
+            self.assertEqual(next(e for e in report if e["file"] == "player_log.txt")["status"],
+                             "skipped")
 
     def test_binary_metrics_big_endian_and_wrap(self):
         with tempfile.TemporaryDirectory() as folder:
