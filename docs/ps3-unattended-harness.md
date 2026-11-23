@@ -84,7 +84,7 @@ seconds of active playback. The eight unsigned 32-bit fields, in order, are:
 3. free system memory in KiB
 4. jitter-buffer occupancy
 5. audio clock in milliseconds
-6. flags (bit zero = paused, bit zero forced sample = capture_metrics)
+6. flags (bit zero = paused, bit one = forced capture_metrics sample)
 7. monotonic millisecond timestamp (wraps modulo 2^32)
 8. reserved zero
 
