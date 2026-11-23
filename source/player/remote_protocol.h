@@ -116,3 +116,19 @@ static inline bool jf_remote_auth_matches(const char *actual, const char *provid
         mismatch |= (unsigned char)actual[i] ^ (unsigned char)provided[i];
     return mismatch == 0 && actual[64] == '\0' && provided[64] == '\0';
 }
+
+// Recent command IDs provide bounded replay rejection within one app run.
+// A stale authenticated command from an old playback generation is already
+// blocked by the session-generation check in the mailbox.
+struct JfRemoteReplay {
+    char recent[16][17];
+    unsigned int next;
+};
+static inline bool jf_remote_record_id(JfRemoteReplay *seen, const char *id) {
+    if (!seen || !jf_remote_hex(id, 16)) return false;
+    for (size_t i = 0; i < 16; ++i)
+        if (!strcmp(seen->recent[i], id)) return false;
+    memcpy(seen->recent[seen->next], id, 17);
+    seen->next = (seen->next + 1U) % 16U;
+    return true;
+}
