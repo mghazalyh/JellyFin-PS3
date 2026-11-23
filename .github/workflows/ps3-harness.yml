@@ -12,6 +12,8 @@ on:
       - 'source/player/threads/player_threads.cpp'
       - 'tests/test_remote_protocol.cpp'
       - 'tests/test_ps3_unattended.py'
+      - 'tests/test_opencode_harness.py'
+      - 'tools/opencode_harness.py'
       - 'tools/ps3_unattended.py'
       - '.github/workflows/ps3-harness.yml'
   workflow_dispatch:
@@ -36,8 +38,9 @@ jobs:
       - name: Run Windows orchestration protocol tests
         run: |
           set -euo pipefail
-          python3 -m py_compile tools/ps3_unattended.py tests/test_ps3_unattended.py
+          python3 -m py_compile tools/ps3_unattended.py tools/opencode_harness.py tests/test_ps3_unattended.py tests/test_opencode_harness.py
           python3 -m unittest discover -s tests -p test_ps3_unattended.py -v
+          python3 -m unittest discover -s tests -p test_opencode_harness.py -v
       - name: Ensure no unreviewed forbidden remote actions
         run: |
           set -euo pipefail
