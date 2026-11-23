@@ -115,7 +115,7 @@ def run(argv: list[str], cwd: Path, timeout: int, log: Path,
                     break
                 if time.monotonic() >= deadline:
                     reason = "timeout"
-                    proc.kill()
+                    stop_process_tree(proc)
                     break
                 time.sleep(0.2)
             try:
