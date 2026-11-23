@@ -86,6 +86,10 @@ class SupervisorTests(unittest.TestCase):
             subprocess.run(["git", "checkout", "-qb",
                             "feature/ps3-unattended-harness-test"],
                            cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid",
+                            "commit", "--allow-empty", "-qm", "baseline"],
+                           cwd=repo, check=True, capture_output=True)
             result = h.execute(repo, base / "logs", ["audit"],
                                "__opencode_fake_unavailable__", 5, 5)
             self.assertEqual(result["result"], "failed")
@@ -125,13 +129,23 @@ class SupervisorTests(unittest.TestCase):
     def test_independent_validation_fail_is_not_a_pass(self):
         with tempfile.TemporaryDirectory() as folder:
             base = pathlib.Path(folder)
-            with patch.object(h, "git_check", return_value=("feature/ps3-unattended-harness-test", "")):
-                with patch.object(h, "independent_validation", return_value={
-                    "python_unittest": {"ok": False, "reason": "regression"}
-                }):
-                    result = h.execute(base, base / "out", ["validate"],
-                                       "opencode", 5, 5)
-                    self.assertEqual(result["result"], "failed")
+            repo = base / "git"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "checkout", "-qb",
+                            "feature/ps3-unattended-harness-test"],
+                           cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid",
+                            "commit", "--allow-empty", "-qm", "baseline"],
+                           cwd=repo, check=True, capture_output=True)
+            with patch.object(h, "independent_validation", return_value={
+                "python_unittest": {"ok": False, "reason": "regression"}
+            }):
+                result = h.execute(repo, base / "out", ["validate"],
+                                   "opencode", 5, 5)
+                self.assertEqual(result["result"], "failed")
 
 
 if __name__ == "__main__":
