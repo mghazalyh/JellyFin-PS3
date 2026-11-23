@@ -27,6 +27,21 @@ int main() {
     assert(!jf_remote_auth_matches("", c.auth));
     assert(jf_remote_action_valid("favorite_previous"));
     assert(!jf_remote_action_valid("exec"));
+    JfRemoteReplay replay = {};
+    assert(jf_remote_record_id(&replay, "0123456789abcdef"));
+    assert(!jf_remote_record_id(&replay, "0123456789abcdef"));
+    assert(!jf_remote_record_id(&replay, "invalid"));
+    // Rolling 16-entry history and deterministic oldest-entry eviction.
+    for (unsigned int i = 0; i < 15; ++i) {
+        char id[17];
+        snprintf(id, sizeof id, "%016llx", (unsigned long long)(i + 1));
+        assert(jf_remote_record_id(&replay, id));
+        assert(!jf_remote_record_id(&replay, id));
+    }
+    assert(jf_remote_record_id(&replay, "0123456789abcdef") == false);
+    assert(jf_remote_record_id(&replay, "0000000000000010"));
+    assert(jf_remote_record_id(&replay, "0123456789abcdef"));
+
     std::string enabled = valid("set_audio_sync_beta") + "value=1\n";
     assert(parse(enabled, &c) && c.has_value && c.value == 1);
     assert(!parse(valid("set_audio_sync_beta"), &c));
