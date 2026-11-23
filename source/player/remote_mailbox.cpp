@@ -27,6 +27,8 @@ static bool s_success = false;
 static u32 s_result_generation = 0;
 static char s_secret[65] = "";
 static bool s_sample_initialized = false;
+static volatile u32 s_metric_drops = 0;
+static u64 s_command_started_us = 0;
 
 static void lock_state(void) {
     while (!__sync_bool_compare_and_swap(&s_lock, 0, 1))
@@ -59,6 +61,7 @@ bool jf_remote_take(JfRemoteCommand *out) {
         // Do not retain the bearer secret any longer than necessary.
         memset(s_command.auth, 0, sizeof s_command.auth);
         s_state = 2;
+        s_command_started_us = timing_get_us();
     }
     unlock_state();
     return available;
@@ -84,6 +87,9 @@ static bool write_result(const char *id, bool success, const char *detail,
     bool ok = n > 0 && fflush(f) == 0;
     if (fclose(f) != 0) ok = false;
     if (ok && rename(JF_REMOTE_RESPONSE_TMP, JF_REMOTE_RESPONSE) == 0) return true;
+    // Some console filesystems disallow rename over an existing destination.
+    if (ok && remove(JF_REMOTE_RESPONSE) == 0 &&
+        rename(JF_REMOTE_RESPONSE_TMP, JF_REMOTE_RESPONSE) == 0) return true;
     remove(JF_REMOTE_RESPONSE_TMP);
     return false;
 }
@@ -111,6 +117,9 @@ void jf_remote_tick(u32 generation, const char *mode, bool playing,
     u32 result_gen = 0;
     bool need_write = false;
     lock_state();
+    if (s_state == 2 && timing_get_us() - s_command_started_us > 90000000ULL) {
+        finish_locked(false, "Surf action timed out", generation);
+    }
     if (s_state == 3) {
         snprintf(id, sizeof id, "%s", s_command.id);
         snprintf(detail, sizeof detail, "%s", s_detail);
@@ -169,7 +178,7 @@ void jf_remote_tick(u32 generation, const char *mode, bool playing,
         write_result(request.id, true, playing ? "playing" : "idle",
                      generation, mode, free_kb, queue_depth);
         if (!strcmp(request.action, "capture_metrics"))
-            jf_remote_sample(generation, free_kb, queue_depth, 0, 1);
+            jf_remote_sample(generation, free_kb, queue_depth, 0, 2);
         return;
     }
     if (!playing || !mode || !mode[0]) {
@@ -210,13 +219,14 @@ void jf_remote_sample(u32 generation, u32 free_kb, u32 queue_depth,
         rename(JF_METRICS_PATH, JF_METRICS_PREV);
     }
     FILE *f = fopen(JF_METRICS_PATH, "ab");
-    if (!f) return;
+    if (!f) { __sync_add_and_fetch(&s_metric_drops, 1); return; }
     // PPU is big endian; all fields are fixed-width 32-bit integers.
     const uint32_t record[8] = {
         0x4a464d31U, (uint32_t)(generation), (uint32_t)free_kb,
         (uint32_t)queue_depth, (uint32_t)audio_clock_ms, (uint32_t)flags,
         (uint32_t)(timing_get_us() / 1000ULL), 0U
     };
-    fwrite(record, sizeof record, 1, f);
-    fclose(f);
+    if (fwrite(record, sizeof record, 1, f) != 1)
+        __sync_add_and_fetch(&s_metric_drops, 1);
+    if (fclose(f) != 0) __sync_add_and_fetch(&s_metric_drops, 1);
 }
