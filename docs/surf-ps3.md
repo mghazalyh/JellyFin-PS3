@@ -59,6 +59,7 @@ field correlates a client observation to the CatalogService log. Logs are
 bounded by the server's standard rate limits and retention policy. No raw
 stream URL or authentication token is logged.
 
-Version 3.6.4 supersedes the untested 3.6.3 Surf beta. Its PKG is built
+Version 3.6.5 supersedes the earlier Surf betas. Its controller commands
+avoid per-action heap allocations. Its PKG is built
 with pinned ps3dev nightly-2026-07-26
 GCC 7.2.0. Physical-console synchronization remains to be verified.

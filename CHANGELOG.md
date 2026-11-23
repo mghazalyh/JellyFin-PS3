@@ -10,7 +10,24 @@ public: it froze on the Home screen on real hardware, ran out of memory at
 1080p, and had sign-in and update-check bugs (see 3.3.0 below). vortigauntlet's own release notes for 3.2.3
 and earlier are kept at the end, as he wrote them.
 
-## 3.6.4 (PS3 Surf hardware-safety audit)
+## 3.6.5
+
+PS3 Surf regression fixes and GitHub-only build:
+
+- Bounded, reusable Surf controller worker job, avoiding two dynamic
+  allocations per action and securely clearing duplicate auth tokens.
+- DTS-HD channel/plane validation and FLAC sign extension safe for all
+  1 to 32 bit residuals. Additional code bounds checks and stress tests.
+- Corrected telemetry format type, cancelled Live TV keyboard buffer,
+  unused telemetry counters, and embedded NUL characters in XMB source.
+- Expanded host regression and build validation run exclusively on GitHub
+  with the pinned PS3 GCC 7.2 SDK. Physical PS3 tests remain outstanding.
+- Experimental adaptive sync remains OFF by default pending real hardware
+  timing measurements.
+
+## 3.6.4
+
+PS3 Surf hardware-safety audit.
 
 - **Supersedes 3.6.3 Surf beta 1**, which should not be installed for the first PS3 test:
   its experimental synchronizer cleared the CellAudio DMA ring from the wrong

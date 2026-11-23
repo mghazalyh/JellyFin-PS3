@@ -1,7 +1,18 @@
-# JellyFin PS3 Surf 3.6.4 beta (hardware audit)
+# JellyFin PS3 Surf 3.6.5 beta (GitHub-audited build)
 
 Native PlayStation 3 Surf looping-channel support built using the pinned
 ps3dev 2026-07-26 GCC 7.2 toolchain.
+
+**Fixes since 3.6.4**
+
+* Surf controller network commands now reuse a fixed-size command buffer
+  without allocating or freeing a request and auth token on each click.
+* Added DTS-HD channel/plane bounds checks and portable FLAC signed residual
+  conversion with extensive host tests.
+* Corrected telemetry format type, redundant counter tracking, cancelled
+  Live TV search input initialization, and NUL literals in XMB source.
+* GitHub cloud tests and pinned PS3 GCC 7.2 cross-builds generate the package
+  entirely on disposable GitHub runners, not the developer's Mac Mini.
 
 **Included in the package**
 
@@ -17,13 +28,12 @@ ps3dev 2026-07-26 GCC 7.2 toolchain.
 * Favorite commands now precede telemetry, and status checks take priority
   over remote telemetry. Stale controller actions are isolated by generation.
 
-**Validation:** PS3 GCC 7.2.0 build completed, PKG payload verifier passed,
-scene-cut logic test plus release-version, live-watch, Live TV and stream
-request host tests passed. Existing macOS host toolchain cannot compile the
-jitter-buffer test because its Linux malloc.h header is unavailable.
+**Validation:** GitHub Actions requires the full host regression suite, PS3
+GCC 7.2 cross-build and package payload verification before release.
+Static-analysis results are saved in separate Actions artifacts.
 
-**Warning:** Version 3.6.3 Surf beta 1 is superseded and should not be used
-for initial PS3 testing. Version 3.6.4 contains hardware-concurrency fixes.
+**Warning:** Versions 3.6.3 and 3.6.4 are superseded by 3.6.5.
+Physical PS3 playback and exact A/V source synchronization are unverified.
 
 **Beta limitation:** Frame/source attribution is heuristic because no source
 epoch crosses Jellyfin's remux into video packets. Physical-console

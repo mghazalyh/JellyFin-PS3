@@ -1,10 +1,7 @@
 name: PS3 full host regression and sanitizer suite
 
 on:
-  push:
-    branches:
-      - feature/ps3-surf-native-20261123
-  pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
