@@ -25,6 +25,7 @@
 #include "api_livetv.h"
 #include "lclog.h"
 #include "../core/live_buffer.h"
+#include "../core/ring_capacity.h"
 
 extern u32 running;
 
@@ -69,8 +70,6 @@ extern u32 running;
 // Allocated per playback from whatever is free (player.cpp), between these
 // bounds; below the floor it is not worth the complexity, above the ceiling
 // it starves everything else.
-#define RING_BYTES_MIN  (2u  * 1024u * 1024u)
-#define RING_BYTES_MAX  (40u * 1024u * 1024u)
 // Raised from 14 MB.  A direct-played stream is 3-4x the bitrate of a
 // 10 Mbps transcode, so the old ceiling was barely two seconds of it.
 // The allocator halves down from the ask, so a heap that cannot manage
@@ -92,12 +91,10 @@ void decode_ring_fill(int *packets, int *cap) {
 
 bool decode_ring_alloc(u32 want_bytes) {
     decode_ring_free();
-    if (want_bytes < RING_BYTES_MIN) want_bytes = RING_BYTES_MIN;
-    if (want_bytes > RING_BYTES_MAX) want_bytes = RING_BYTES_MAX;
-    int cap = (int)(want_bytes / TS_PACKET_SIZE);
-    // Try the requested size, then halve down to the floor rather than fail
-    // playback outright over a buffer that is only ever an optimisation.
-    while (cap * TS_PACKET_SIZE >= (int)RING_BYTES_MIN) {
+    int cap = (int)ring_initial_packets(want_bytes, TS_PACKET_SIZE);
+    // Try the requested size, then halve down to the packet-aligned floor.
+    // In particular, do not skip the final attempt due to byte rounding.
+    while (cap > 0) {
         s_ring = (u8 *)malloc((size_t)cap * TS_PACKET_SIZE);
         if (s_ring) {
             s_ring_cap = cap;
@@ -108,7 +105,7 @@ bool decode_ring_alloc(u32 want_bytes) {
             plog(b);
             return true;
         }
-        cap /= 2;
+        cap = (int)ring_next_packets((unsigned)cap, TS_PACKET_SIZE);
     }
     plog("ring: allocation FAILED - playing without read-ahead");
     s_ring_cap = 0;
