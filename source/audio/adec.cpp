@@ -2,6 +2,7 @@
 #include "audio_bitstream.h"
 #include "minimp3.h"
 #include "adec.h"
+#include "audio_pts_clock.h"
 #include "adec_ac3.h"
 #include "adec_dts.h"
 #include "adec_truehd.h"
@@ -107,14 +108,10 @@ static volatile int     s_n  = 0;
 static sys_mutex_t      s_pcm_mtx;
 
 // ---- PTS tracking (guarded by s_pcm_mtx) ----
-// s_next_pcm_pts_us: stream PTS (us) of the write cursor — set from each PES,
-//   then advanced by N*1000000/48000 per decoded frame batch.
-// s_read_pts_us: stream PTS (us) of the read cursor — initialised to the first
-//   valid PES PTS, then advanced inside adec_read_pcm() as samples are consumed.
-static u64  s_pts_origin_us   = 0;      // local files: taken off every PES PTS (adec_set_pts_origin_us)
-static u64  s_next_pcm_pts_us = 0;
-static u64  s_read_pts_us     = 0;
-static bool s_pts_valid       = false;
+// The write cursor is seeded from each PES; the read cursor starts at the
+// first valid PTS. Both retain fractional 48 kHz sample duration across blocks.
+static u64  s_pts_origin_us = 0;      // local files: taken off every PES PTS
+static audio_pts_state s_pts = {};
 
 // ---- PES queue ----
 static u8               s_pes_q[PES_QUEUE_SLOTS][PES_SLOT_BYTES];
@@ -177,8 +174,7 @@ static bool parse_pes_pts(const u8 *pes, int pes_len, u64 *pts_us) {
 void adec_init(void) {
     mp3dec_init(&s_dec);
     s_wr = s_rd = s_n = 0;
-    s_next_pcm_pts_us = s_read_pts_us = 0;
-    s_pts_valid = false;
+    audio_pts_reset(&s_pts);
     sys_mutex_attr_t mattr;
     sysMutexAttrInitialize(mattr);
     sysMutexCreate(&s_pcm_mtx, &mattr);
@@ -218,7 +214,7 @@ static void push_samples(const short *pcm, int n, int channels) {
     }
     // Advance write PTS by the full decoded count (stream time always moves forward,
     // even if the ring dropped some samples due to overflow).
-    s_next_pcm_pts_us += ((u64)n * 1000000ULL) / 48000ULL;
+    audio_pts_advance_write(&s_pts, (unsigned)n);
     sysMutexUnlock(s_pcm_mtx);
 }
 
@@ -285,7 +281,7 @@ void adec_push_frames(const float *frames, int n) {
         s_wr = (s_wr + 1) & (PCM_RING_CAP - 1);
         s_n++;
     }
-    s_next_pcm_pts_us += ((u64)n * 1000000ULL) / 48000ULL;
+    audio_pts_advance_write(&s_pts, (unsigned)n);
     sysMutexUnlock(s_pcm_mtx);
 }
 
@@ -343,17 +339,22 @@ static void adec_decode_pes(const u8 *pes, int pes_len, bool cont) {
         if (pes_pts_us < s_pts_origin_us) { s_skip_cont = true; return; }
         pes_pts_us -= s_pts_origin_us;
         sysMutexLock(s_pcm_mtx, 0);
-        s_next_pcm_pts_us = pes_pts_us;
-        if (!s_pts_valid) {
-            s_read_pts_us = pes_pts_us;
-            s_pts_valid   = true;
 #if BUILD_FOR_RPCS3
-            { char b[64];
-              snprintf(b, sizeof(b), "adec_first_pes: pts=%lluus",
-                       (unsigned long long)pes_pts_us);
-              plog(b); }
+        const bool first_pts = !s_pts.valid;
 #endif
+        if (!audio_pts_seed(&s_pts, pes_pts_us, s_decode_gen, s_flush_gen)) {
+            sysMutexUnlock(s_pcm_mtx);
+            s_skip_cont = true;
+            return;
         }
+#if BUILD_FOR_RPCS3
+        if (first_pts) {
+            char b[64];
+            snprintf(b, sizeof(b), "adec_first_pes: pts=%lluus",
+                     (unsigned long long)pes_pts_us);
+            plog(b);
+        }
+#endif
         sysMutexUnlock(s_pcm_mtx);
     }
     if (pes_len < 9) return;
@@ -524,8 +525,7 @@ void adec_flush(void) {
     adec_pcm_reset();
     adec_eac3_reset();  // E-AC-3: the carry, the decoder's overlap and the resampler's history
     s_wr = s_rd = s_n = 0;
-    s_next_pcm_pts_us = s_read_pts_us = 0;
-    s_pts_valid = false;
+    audio_pts_reset(&s_pts);
     sysMutexUnlock(s_pcm_mtx);
 }
 
@@ -698,8 +698,7 @@ void adec_set_codec(adec_codec_t codec) {
     s_ring_ch = want_ch;
     mp3dec_init(&s_dec);
     s_wr = s_rd = s_n = 0;
-    s_next_pcm_pts_us = s_read_pts_us = 0;
-    s_pts_valid = false;
+    audio_pts_reset(&s_pts);
     sysMutexUnlock(s_pcm_mtx);
 
     char b[64];
@@ -720,15 +719,15 @@ int adec_read_pcm(float *buf, int n_frames) {
         got++;
     }
     if (got > 0)
-        s_read_pts_us += ((u64)got * 1000000ULL) / 48000ULL;
+        audio_pts_advance_read(&s_pts, (unsigned)got);
     sysMutexUnlock(s_pcm_mtx);
     return got;
 }
 
 u64 adec_get_read_pts_us(void) {
     sysMutexLock(s_pcm_mtx, 0);
-    u64 rpts = s_pts_valid ? s_read_pts_us : 0;
-    u64 wpts = s_next_pcm_pts_us;
+    u64 rpts = s_pts.valid ? s_pts.read_us : 0;
+    u64 wpts = s_pts.write_us;
     sysMutexUnlock(s_pcm_mtx);
     static int s_dbg_n = 0;
     if (++s_dbg_n % 500 == 0) {
