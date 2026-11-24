@@ -59,6 +59,14 @@ typedef struct {
     u8   a_pes_buf[TS_APES_BUF_SIZE];
     int  a_pes_len;
     bool a_pes_started;
+    // Per selected elementary PID. Adaptation-only packets do not advance CC.
+    // Keep the previous payload to distinguish a real retransmission from a
+    // counter collision carrying different bytes.
+    u8 cc_seen;
+    u8 cc_last[2];
+    u8 cc_len[2];
+    bool cc_pusi[2];
+    u8 cc_payload[2][184];
 } TSState;
 
 // PES truncation telemetry.  The PES_TRUNC log line stops after 20 lines, so

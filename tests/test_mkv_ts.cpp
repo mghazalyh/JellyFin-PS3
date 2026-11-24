@@ -85,7 +85,7 @@ static Parsed parse_ts(const Vec &ts) {
         const uint16_t pid = k == 0 ? st->video_pid : st->audio_pid;
         if (!pid) continue;
         uint8_t p[188]; memset(p, 0xFF, sizeof p);
-        p[0] = 0x47; p[1] = (uint8_t)(0x40 | (pid >> 8)); p[2] = (uint8_t)pid; p[3] = 0x10;
+        p[0] = 0x47; p[1] = (uint8_t)(0x40 | (pid >> 8)); p[2] = (uint8_t)pid; p[3] = (uint8_t)(0x10 | ((cc[pid] + 1) & 15));
         p[4] = 0; p[5] = 0; p[6] = 1;                                          // start code, so it parses
         int vlen = 0, alen = 0;
         const int r = ts_process(st, p, vpes, &vlen, apes, &alen);

@@ -250,6 +250,41 @@ void ts_pes_stats_reset(void) {
     memset(&s_a_acc, 0, sizeof(s_a_acc));
 }
 
+// A damaged fragment must not be delivered as the previous complete PES
+// when a new payload-unit start arrives. Wait for the next valid start.
+static void discard_pes(TSState *ts, unsigned stream) {
+    if (stream == 0) {
+        ts->pes_len = 0; ts->pes_started = false; s_v_acc.want = 0;
+    } else {
+        ts->a_pes_len = 0; ts->a_pes_started = false; s_a_acc.want = 0;
+    }
+}
+static void reset_continuity(TSState *ts, unsigned stream) {
+    discard_pes(ts, stream);
+    ts->cc_seen &= (u8)~(1u << stream);
+}
+// Returns false only for an exact repeated payload. Counter gaps or a
+// collision with different bytes discard the in-flight PES, but a new PUSI
+// may start a valid one immediately. No continuity check on adaptation-only.
+static bool accept_payload(TSState *ts, unsigned stream, u8 cc, bool pusi,
+                           const u8 *pay, int plen) {
+    const u8 bit = (u8)(1u << stream);
+    if (ts->cc_seen & bit) {
+        if (cc == ts->cc_last[stream] && ts->cc_len[stream] == plen &&
+            ts->cc_pusi[stream] == pusi &&
+            memcmp(ts->cc_payload[stream], pay, (size_t)plen) == 0)
+            return false;
+        if (cc != ((ts->cc_last[stream] + 1u) & 15u))
+            discard_pes(ts, stream);
+    }
+    ts->cc_seen |= bit;
+    ts->cc_last[stream] = cc;
+    ts->cc_len[stream] = (u8)plen;
+    ts->cc_pusi[stream] = pusi;
+    memcpy(ts->cc_payload[stream], pay, (size_t)plen);
+    return true;
+}
+
 int ts_process(TSState *ts, const u8 *pkt,
                u8 *out_vpes, int *out_vlen,
                u8 *out_apes, int *out_alen) {
@@ -261,11 +296,23 @@ int ts_process(TSState *ts, const u8 *pkt,
     u16  pid     = ((u16)(pkt[1] & 0x1F) << 8) | pkt[2];
     u8   afl     = (pkt[3] >> 4) & 3;
     bool has_pay = (afl & 1) != 0;
-    if (!has_pay) return 0;
-
-    int  off = 4;
-    if (afl & 2) off += pkt[4] + 1;
-    if (off >= TS_PACKET_SIZE) return 0;
+    const bool video = ts->video_pid && pid == ts->video_pid;
+    const bool audio = ts->audio_pid && pid == ts->audio_pid;
+    int off = 4;
+    bool disc = false;
+    if (afl & 2) {
+        const int length = pkt[4];
+        off += length + 1;
+        if (length > 0 && off <= TS_PACKET_SIZE) disc = (pkt[5] & 0x80) != 0;
+    }
+    const bool invalid = (pkt[1] & 0x80) || (pkt[3] & 0xc0) ||
+                         afl == 0 || off > TS_PACKET_SIZE ||
+                         (has_pay && off == TS_PACKET_SIZE);
+    if (disc || invalid) {
+        if (video) reset_continuity(ts, 0);
+        if (audio) reset_continuity(ts, 1);
+    }
+    if (invalid || !has_pay) return 0;
 
     const u8 *pay  = pkt + off;
     int       plen = TS_PACKET_SIZE - off;
@@ -285,14 +332,14 @@ int ts_process(TSState *ts, const u8 *pkt,
 
     int result = 0;
 
-    if (ts->video_pid && pid == ts->video_pid &&
+    if (video && accept_payload(ts, 0, pkt[3] & 15, pusi, pay, plen) &&
         pes_accumulate(ts->pes_buf, (int)sizeof(ts->pes_buf),
                        &ts->pes_len, &ts->pes_started,
                        pusi, pay, plen, out_vpes, out_vlen,
                        &s_v_acc, "video"))
         result |= 1;
 
-    if (ts->audio_pid && pid == ts->audio_pid &&
+    if (audio && accept_payload(ts, 1, pkt[3] & 15, pusi, pay, plen) &&
         pes_accumulate(ts->a_pes_buf, (int)sizeof(ts->a_pes_buf),
                        &ts->a_pes_len, &ts->a_pes_started,
                        pusi, pay, plen, out_apes, out_alen,
