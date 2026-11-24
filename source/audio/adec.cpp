@@ -3,6 +3,7 @@
 #include "minimp3.h"
 #include "adec.h"
 #include "audio_pts_clock.h"
+#include "pes_queue_reserve.h"
 #include "adec_ac3.h"
 #include "adec_dts.h"
 #include "adec_truehd.h"
@@ -85,7 +86,7 @@ extern void crash_log(const char *msg);
 // path is why shrinking the slot is safe at all.
 //
 // The 75% hungry threshold is deliberately NOT raised. That margin is what
-// stops pes_enqueue() reaching the full-queue path below, which DROPS the
+// stops adec_push_pes() reaching the full-queue path below, which DROPS the
 // oldest PES -- audible as skipped audio. Reshaping the queue buys preroll
 // depth without spending that safety margin; raising the threshold would buy
 // the same depth by spending it.
@@ -366,20 +367,6 @@ static void adec_decode_pes(const u8 *pes, int pes_len, bool cont) {
 
 // Enqueue one chunk.  Caller holds s_pes_mtx.
 static void pes_enqueue(const u8 *buf, int len, bool cont) {
-    if (s_pes_q_n >= PES_QUEUE_SLOTS) {
-        // queue full — drop oldest to avoid back-pressuring the demux thread
-        s_pes_q_rd = (s_pes_q_rd + 1) % PES_QUEUE_SLOTS;
-        s_pes_q_n--;
-        // A dropped PES = skipped audio = playback jumps ahead.  Count it --
-        // on hardware too, where it is the thing people actually hear.
-        static u64 s_pes_drops = 0;
-        if ((s_pes_drops++ % 32) == 0) {
-            char b[64];
-            snprintf(b, sizeof(b), "adec_pes_drop: queue full, drops=%llu",
-                     (unsigned long long)s_pes_drops);
-            plog(b);
-        }
-    }
     memcpy(s_pes_q[s_pes_q_wr], buf, len);
     s_pes_q_len[s_pes_q_wr]  = len;
     s_pes_q_cont[s_pes_q_wr] = cont ? 1 : 0;
@@ -405,7 +392,7 @@ static void pes_enqueue(const u8 *buf, int len, bool cont) {
 }
 
 void adec_push_pes(const u8 *pes, int pes_len) {
-    if (pes_len <= 0) return;
+    if (!pes || pes_len <= 0) return;
     // A PES bigger than one queue slot is SPLIT, not dropped.  MP3 and AC-3
     // PES never reach 8 KB, so this loop runs exactly once for them and the
     // shipped path is byte-identical.  A stream-copied DTS-HD MA / DTS:X
@@ -416,6 +403,29 @@ void adec_push_pes(const u8 *pes, int pes_len) {
     // enlarging the slots keeps the queue at 2 MB instead of 8 MB.
     // The whole PES is enqueued under one lock so its chunks stay adjacent.
     sysMutexLock(s_pes_mtx, 0);
+    // Reserve the whole PES before publishing any of its chunks. Evicting
+    // one slot at a time can expose a continuation without its PES head.
+    const int required = 1 + (pes_len - 1) / PES_SLOT_BYTES;
+    const int discard = pes_queue_discard_count(s_pes_q_cont, PES_QUEUE_SLOTS,
+                                                s_pes_q_rd, s_pes_q_n, required);
+    if (discard < 0) {
+        plog("adec_pes_drop: PES exceeds queue capacity or invalid queue");
+        sysMutexUnlock(s_pes_mtx);
+        return;
+    }
+    if (discard > 0) {
+        s_pes_q_rd = (s_pes_q_rd + discard) % PES_QUEUE_SLOTS;
+        s_pes_q_n -= discard;
+        static u64 dropped_slots = 0;
+        dropped_slots += discard;
+        static u64 drop_events = 0;
+        if ((drop_events++ % 32) == 0) {
+            char b[96];
+            snprintf(b, sizeof(b), "adec_pes_drop: queue full, discarded=%d slots, total=%llu",
+                     discard, (unsigned long long)dropped_slots);
+            plog(b);
+        }
+    }
     bool cont = false;
     while (pes_len > 0) {
         int take = (pes_len < PES_SLOT_BYTES) ? pes_len : PES_SLOT_BYTES;
