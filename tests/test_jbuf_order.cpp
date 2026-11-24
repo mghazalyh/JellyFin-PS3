@@ -10,8 +10,16 @@ struct sys_mutex_attr_t { int attr_protocol, attr_recursive; };
 #define SYS_LWMUTEX_ATTR_PROTOCOL 0
 #define SYS_MUTEX_ATTR_RECURSIVE  0
 #define sysMutexAttrInitialize(a) ((a).attr_protocol = 0, (a).attr_recursive = 0)
-static int sysMutexCreate(sys_mutex_t *, sys_mutex_attr_t *) { return 0; }
-static int sysMutexDestroy(sys_mutex_t)     { return 0; }
+static bool fail_create = false, fail_destroy = false;
+static int create_calls = 0, destroy_calls = 0;
+static int sysMutexCreate(sys_mutex_t *, sys_mutex_attr_t *) {
+    ++create_calls;
+    return fail_create ? -1 : 0;
+}
+static int sysMutexDestroy(sys_mutex_t) {
+    ++destroy_calls;
+    return fail_destroy ? -1 : 0;
+}
 static int sysMutexLock(sys_mutex_t, unsigned long long) { return 0; }
 static int sysMutexUnlock(sys_mutex_t)      { return 0; }
 void plog(const char *) {}
@@ -92,7 +100,36 @@ static void discontinuity(void) {
     jbuf_free();
 }
 
+static void mutex_lifecycle(void) {
+    const int start_creates = create_calls, start_destroys = destroy_calls;
+    fail_create = true;
+    CHECK(!jbuf_alloc(640, 360), "mutex creation failure must fail startup");
+    CHECK(create_calls == start_creates + 1, "creation failure was not exercised");
+    jbuf_free();
+    CHECK(destroy_calls == start_destroys, "destroy called for an invalid mutex");
+
+    fail_create = false;
+    CHECK(jbuf_alloc(640, 360), "retry after a creation failure");
+    CHECK(!jbuf_alloc(640, 360), "duplicate session init should fail");
+    CHECK(create_calls == start_creates + 2, "duplicate mutex created");
+
+    fail_destroy = true;
+    jbuf_free();
+    CHECK(destroy_calls == start_destroys + 1, "destruction failure not exercised");
+    CHECK(!jbuf_alloc(640, 360), "must not overwrite an unresolved mutex");
+
+    fail_destroy = false;
+    jbuf_free();
+    CHECK(destroy_calls == start_destroys + 2, "destruction retry missing");
+    jbuf_free();
+    CHECK(destroy_calls == start_destroys + 2, "duplicate destroy");
+    CHECK(jbuf_alloc(640, 360), "reopen after successful cleanup");
+    jbuf_free();
+    CHECK(destroy_calls == start_destroys + 3, "reopened mutex leaked");
+}
+
 int main() {
+    mutex_lifecycle();
     full_queue(1920, 1080);   // 8-slot 1080p ring
     full_queue(1280, 720);    // 24-slot ring
     pixels_follow();

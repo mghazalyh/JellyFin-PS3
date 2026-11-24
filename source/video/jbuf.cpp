@@ -17,6 +17,7 @@
 // s_jbuf_mtx guards s_jb_n and the read/write indices.
 
 sys_mutex_t s_jbuf_mtx;
+static bool s_jbuf_mutex_ready = false;
 
 static u8  *s_jbuf_data[JBUF_MAX_SLOTS] = {};
 static u64  s_jbuf_pts[JBUF_MAX_SLOTS]  = {};
@@ -116,6 +117,10 @@ bool jbuf_reserve(u32 fw, u32 fh) {
 }
 
 bool jbuf_alloc(u32 fw, u32 fh) {
+    if (s_jbuf_mutex_ready) {
+        plog("jbuf: session mutex already active");
+        return false;
+    }
     if (!jbuf_reserve(fw, fh)) return false;
     s_jbuf_fw = fw; s_jbuf_fh = fh;
     s_jb_wr = s_jb_rd = s_jb_n = 0;
@@ -127,14 +132,25 @@ bool jbuf_alloc(u32 fw, u32 fh) {
     sysMutexAttrInitialize(attr);
     attr.attr_protocol  = SYS_LWMUTEX_ATTR_PROTOCOL;
     attr.attr_recursive = SYS_MUTEX_ATTR_RECURSIVE;
-    if (sysMutexCreate(&s_jbuf_mtx, &attr) != 0) plog("jbuf: mutex create FAILED");
+    if (sysMutexCreate(&s_jbuf_mtx, &attr) != 0) {
+        plog("jbuf: mutex create FAILED");
+        return false;
+    }
+    s_jbuf_mutex_ready = true;
     return true;
 }
 
 void jbuf_free(void) {
     // Slot buffers stay cached (see jbuf_reserve) — only session state dies.
     s_jb_wr = s_jb_rd = s_jb_n = 0;
-    sysMutexDestroy(s_jbuf_mtx);
+    if (s_jbuf_mutex_ready) {
+        if (sysMutexDestroy(s_jbuf_mtx) == 0) {
+            s_jbuf_mutex_ready = false;
+        } else {
+            // Never start a second session with an unresolved mutex lifetime.
+            plog("jbuf: mutex destroy FAILED");
+        }
+    }
 }
 
 void jbuf_clear(void) {
