@@ -19,8 +19,10 @@ While watching **Surf: All Channels**, **Surf: Sports** or **Surf: Movies & Seri
    HTTP response is only acceptance; confirmation requires the server to report
    that exact source ID in playing state. This affects every viewer of that
    Surf mode. It does not prove the native decoder has presented the source.
-6. **Select Current Channel** clears the Previous selection. After a confirmed
-   switch use Favorite Current Channel; the old historical token is cleared.
+6. **Select Previous for Favorite** cycles history without switching the shared
+   stream. **Favorite Selected Previous** retains the exact historical token.
+   **Select Current Channel** clears this selection. After a confirmed playback
+   switch, Favorite Current Channel targets the new server source.
 7. **Show Surf Source Status** displays the current publishing source.
 
 A Favorites success message requires HTTP success from CatalogService, which

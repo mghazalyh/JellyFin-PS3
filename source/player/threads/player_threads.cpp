@@ -530,7 +530,7 @@ static void live_guide_fetch(const char *channel, u32 gen) {
         json_get_string(json, "source_id", source_id, sizeof source_id);
         json_get_string(json, "boot", boot, sizeof boot);
         json_get_string(json, "state", state, sizeof state);
-        if (running && g_prog.gen == gen && g_prog.playing &&
+        if (running && g_prog.gen == gen && g_prog.playing && g_prog.pos_valid &&
             !strcmp(state, "playing")) {
             // Candidates and stalled/starting sources must not trigger an
             // audio transition or become Favorites.

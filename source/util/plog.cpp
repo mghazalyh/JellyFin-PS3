@@ -22,6 +22,9 @@
 // the field, were the part that got cut.  256 x 256 is 64 KB of ring,
 // 24 KB more than before, against a heap that has ~48 MB free at reserve.
 #define PLOG_LEN   256
+#define PLOG_MAX_BYTES (2u * 1024u * 1024u)
+#define PLOG_PATH "/dev_hdd0/tmp/player_log.txt"
+#define PLOG_PREV "/dev_hdd0/tmp/player_log.prev.txt"
 
 static char              s_plog_ring[PLOG_RING][PLOG_LEN];
 static volatile int      s_plog_wr      = 0;
@@ -30,9 +33,11 @@ static volatile int      s_plog_lock    = 0;
 static volatile bool     s_plog_running = false;
 static FILE             *s_plog_file    = NULL;
 static sys_ppu_thread_t  s_plog_tid     = 0;
+static unsigned s_plog_bytes = 0; // drain thread only once started
+static unsigned s_plog_dropped = 0; // protected by ring lock
 
 void plog(const char *msg) {
-    if (!s_plog_running) return;
+    if (!s_plog_running || !msg) return;
     while (!__sync_bool_compare_and_swap(&s_plog_lock, 0, 1))
         ;
     int next = (s_plog_wr + 1) % PLOG_RING;
@@ -40,30 +45,56 @@ void plog(const char *msg) {
         strncpy(s_plog_ring[s_plog_wr], msg, PLOG_LEN - 1);
         s_plog_ring[s_plog_wr][PLOG_LEN - 1] = '\0';
         s_plog_wr = next;
+    } else if (s_plog_dropped != 0xffffffffu) {
+        ++s_plog_dropped;
     }
     __sync_bool_compare_and_swap(&s_plog_lock, 1, 0);
 }
 
+// Only the drain thread owns file I/O during a session. Keep two bounded
+// files, retain the older file if a rename fails, and never write unboundedly
+// to a failing filesystem.
+static bool plog_rotate(void) {
+    if (s_plog_file) { fclose(s_plog_file); s_plog_file = NULL; }
+    remove(PLOG_PREV);
+    if (rename(PLOG_PATH, PLOG_PREV) != 0) return false;
+    s_plog_file = fopen(PLOG_PATH, "w");
+    s_plog_bytes = 0;
+    return s_plog_file != NULL;
+}
+static void plog_write(const char *msg) {
+    if (!s_plog_file) return;
+    if (s_plog_bytes + PLOG_LEN + 32u > PLOG_MAX_BYTES && !plog_rotate()) return;
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    int n = tm ? fprintf(s_plog_file, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
+                        tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                        tm->tm_hour, tm->tm_min, tm->tm_sec, msg)
+               : fprintf(s_plog_file, "[time unavailable] %s\n", msg);
+    if (n < 0) { fclose(s_plog_file); s_plog_file = NULL; return; }
+    s_plog_bytes += (unsigned)n;
+}
 static void plog_drain(void) {
     char local[PLOG_LEN];
-    while (true) {
-        while (!__sync_bool_compare_and_swap(&s_plog_lock, 0, 1))
-            ;
-        bool empty = (s_plog_rd == s_plog_wr);
+    unsigned dropped = 0;
+    for (unsigned i = 0; i < PLOG_RING; ++i) {
+        while (!__sync_bool_compare_and_swap(&s_plog_lock, 0, 1)) ;
+        if (i == 0) { dropped = s_plog_dropped; s_plog_dropped = 0; }
+        const bool empty = s_plog_rd == s_plog_wr;
         if (!empty) {
             memcpy(local, s_plog_ring[s_plog_rd], PLOG_LEN);
             s_plog_rd = (s_plog_rd + 1) % PLOG_RING;
         }
         __sync_bool_compare_and_swap(&s_plog_lock, 1, 0);
         if (empty) break;
-        if (s_plog_file) {
-            time_t t = time(NULL);
-            struct tm *tm = localtime(&t);
-            fprintf(s_plog_file, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
-                    tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-                    tm->tm_hour, tm->tm_min, tm->tm_sec, local);
-            fflush(s_plog_file);
-        }
+        plog_write(local);
+    }
+    if (dropped) {
+        snprintf(local, sizeof local, "plog: %u diagnostic messages dropped", dropped);
+        plog_write(local);
+    }
+    if (s_plog_file && fflush(s_plog_file) != 0) {
+        fclose(s_plog_file); s_plog_file = NULL;
     }
 }
 
@@ -81,12 +112,26 @@ void plog_start(void) {
     if (s_plog_running) return;
     // Keep the last run's log: a session that ended in a black screen or a
     // hard power-off is exactly the one worth reading, and "w" wiped it.
-    remove("/dev_hdd0/tmp/player_log.prev.txt");
-    rename("/dev_hdd0/tmp/player_log.txt", "/dev_hdd0/tmp/player_log.prev.txt");
-    s_plog_file    = fopen("/dev_hdd0/tmp/player_log.txt", "w");
+    // Do not erase the previous log when there is no current log to rotate.
+    FILE *old = fopen(PLOG_PATH, "r");
+    if (old) {
+        fclose(old);
+        remove(PLOG_PREV);
+        if (rename(PLOG_PATH, PLOG_PREV) != 0) return;
+    }
+    s_plog_file = fopen(PLOG_PATH, "w");
+    if (!s_plog_file) return;
+    s_plog_bytes = 0;
+    s_plog_rd = s_plog_wr = 0;
+    s_plog_dropped = 0;
     s_plog_running = true;
-    sysThreadCreate(&s_plog_tid, plog_thread_fn, NULL,
-                    1200, 32 * 1024, 0, "jf_plog");
+    if (sysThreadCreate(&s_plog_tid, plog_thread_fn, NULL,
+                        1200, 32 * 1024, THREAD_JOINABLE, "jf_plog") != 0) {
+        s_plog_running = false;
+        s_plog_tid = 0;
+        fclose(s_plog_file);
+        s_plog_file = NULL;
+    }
 }
 
 void plog_stop(void) {
