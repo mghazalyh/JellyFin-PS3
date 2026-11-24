@@ -455,7 +455,7 @@ static void surf_action_worker(void *arg) {
 
 // Only the rendering thread publishes selection to the HUD/menu. Its identity
 // is stable across a Surf rotation and never follows a changing status field.
-static void surf_feedback_poll(const PlayerState *ps) {
+static void surf_feedback_poll(PlayerState *ps) {
     if (!__sync_lock_test_and_set(&s_surf_feedback_ready, 0)) return;
     __sync_synchronize();
     const char *mode = surf_mode_for(ps);
@@ -469,6 +469,8 @@ static void surf_feedback_poll(const PlayerState *ps) {
                  s_surf_result_token);
         snprintf(s_surf_selected_mode, sizeof s_surf_selected_mode, "%s",
                  mode);
+        if (ps->menu_kind == PLAYER_MENU_OPTIONS && hud_menu_open())
+            player_open_options(ps, hud_menu_cursor());
     }
     hud_set_banner("Surf Live TV", s_surf_feedback_text,
                    timing_get_us() + 3500000ULL);
@@ -570,6 +572,28 @@ void player_open_options(PlayerState *ps, int row) {
     const bool chapters = player_has_chapters(ps);
     const bool tracks   = !ps->live && (has_audio_menu(ps) || has_subs_menu(ps));
     const bool ep       = is_episode(ps);
+    if (surf_mode_for(ps)) {
+        s_opt_kind[n] = OPT_SURF_PAUSE; s_opt_items[n] = "Pause Surf Looping";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Hold this channel"); n++;
+        s_opt_kind[n] = OPT_SURF_RESUME; s_opt_items[n] = "Resume Surf Looping";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Continue channel rotation"); n++;
+        s_opt_kind[n] = OPT_SURF_FAVORITE; s_opt_items[n] = "Favorite Current Channel";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Server source, not buffered picture"); n++;
+        s_opt_kind[n] = OPT_SURF_PREVIOUS; s_opt_items[n] = "Select Previous Channel";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
+                 s_surf_selected_source[0] ? s_surf_selected_source : "Cycle playable history"); n++;
+        s_opt_kind[n] = OPT_SURF_FAVORITE_PREVIOUS;
+        s_opt_items[n] = "Favorite Selected Previous";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
+                 s_surf_selected_source[0] ? s_surf_selected_source : "Select Previous first"); n++;
+        s_opt_kind[n] = OPT_SURF_CURRENT; s_opt_items[n] = "Select Current Channel";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Clear Previous selection"); n++;
+        s_opt_kind[n] = OPT_SURF_STATUS; s_opt_items[n] = "Show Surf Source Status";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Publisher state may lead screen"); n++;
+        s_opt_kind[n] = OPT_SURF_SYNC; s_opt_items[n] = "Adaptive Audio Sync (Beta)";
+        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
+                 surf_sync_enabled() ? "On (experimental)" : "Off by default"); n++;
+    }
     if (chapters) {
         s_opt_kind[n] = OPT_CHAPTERS; s_opt_items[n] = TR("Chapters");
         opt_chapters_value(ps, s_opt_valbuf[n], sizeof s_opt_valbuf[n]); n++;
@@ -604,32 +628,10 @@ void player_open_options(PlayerState *ps, int row) {
         s_opt_kind[n] = OPT_SKIP_CREDITS; s_opt_items[n] = TR("Skip Credits");
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s", tr(skip_mode_label(skip_credits_mode()))); n++;
     }
-    if (surf_mode_for(ps)) {
-        s_opt_kind[n] = OPT_SURF_PAUSE; s_opt_items[n] = "Pause Surf Looping";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Hold this channel"); n++;
-        s_opt_kind[n] = OPT_SURF_RESUME; s_opt_items[n] = "Resume Surf Looping";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Switch each minute"); n++;
-        s_opt_kind[n] = OPT_SURF_FAVORITE; s_opt_items[n] = "Favorite Current Channel";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Server source, not buffered picture"); n++;
-        s_opt_kind[n] = OPT_SURF_PREVIOUS; s_opt_items[n] = "Select Previous Channel";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
-                 s_surf_selected_source[0] ? s_surf_selected_source : "Cycle playable history"); n++;
-        s_opt_kind[n] = OPT_SURF_FAVORITE_PREVIOUS;
-        s_opt_items[n] = "Favorite Selected Previous";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
-                 s_surf_selected_source[0] ? s_surf_selected_source : "Select Previous first"); n++;
-        s_opt_kind[n] = OPT_SURF_CURRENT; s_opt_items[n] = "Select Current Channel";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Clear Previous selection"); n++;
-        s_opt_kind[n] = OPT_SURF_STATUS; s_opt_items[n] = "Show Surf Source Status";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Publisher state may lead screen"); n++;
-        s_opt_kind[n] = OPT_SURF_SYNC; s_opt_items[n] = "Adaptive Audio Sync (Beta)";
-        snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
-                 surf_sync_enabled() ? "On (experimental)" : "Off by default"); n++;
-    }
     for (int i = 0; i < n; i++) s_opt_vals[i] = s_opt_valbuf[i];
     s_opt_n = n;
     ps->menu_kind = PLAYER_MENU_OPTIONS;
-    hud_open_menu(TR("Options"), s_opt_items, n, -1);
+    hud_open_menu(surf_mode_for(ps) ? "Surf Live TV" : TR("Options"), s_opt_items, n, -1);
     hud_set_menu_values(s_opt_vals);
     hud_set_menu_cursor(row);
 }

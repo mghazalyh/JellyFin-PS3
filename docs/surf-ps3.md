@@ -8,7 +8,7 @@ their original control paths.
 
 While watching **Surf: All Channels**, **Surf: Sports** or **Surf: Movies & Series**:
 
-1. Press **START** to open the built-in player Options menu.
+1. Press **START** to open the Surf Live TV menu during playback. Surf controls are first; general picture and statistics options follow. START or Circle closes the menu. It stays open while a channel action is pending.
 2. Use the **D-pad** to move between Surf controls and **X** to choose an action.
 3. **Pause Surf Looping** holds the current source. **Resume Surf Looping**
    continues automatic rotation.
@@ -24,6 +24,17 @@ While watching **Surf: All Channels**, **Surf: Sports** or **Surf: Movies & Seri
 A Favorites success message requires HTTP success from CatalogService, which
 validates the selected source and writes to Jellyfin. If CatalogService cannot
 resolve a unique original channel, it returns an error instead.
+
+## Wi-Fi Live TV stability policy
+
+When the console reports a wireless connection, Live TV requests use a
+stability-first 480p ceiling with a nominal 1.5 Mbps whole-transport
+budget. The lower 360p choice remains available (700 kbps). Both budget
+audio and TS overhead, and request transcoded audio instead of variable
+rate HD audio copies. Stereo MP3 remains 192 kbps; requested AC-3 is
+320 kbps. Wired Live TV and VOD request policies are unchanged. These
+are conservative request targets, not measured guarantees of actual
+server output or 802.11b throughput; verify on the intended console/AP.
 
 ## Adaptive audio transition (beta)
 

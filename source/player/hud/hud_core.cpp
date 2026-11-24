@@ -172,6 +172,8 @@ void hud_set_menu_cursor(int row) {
     g_hud.menu_epoch++;
 }
 
+int hud_menu_cursor(void) { return g_hud.menu_sel; }
+
 bool hud_menu_open(void) { return g_hud.menu_visible; }
 
 void hud_close_menu(void) {
@@ -293,7 +295,11 @@ HudAction hud_handle_input(bool l2_pressed, bool r2_pressed, bool paused) {
     }
 
     // Auto-hide after an idle timeout, a longer one while paused.
-    if (g_hud.visible &&
+    // Keep the controller-driven Surf menu open while an asynchronous
+    // channel action completes; START or Circle explicitly dismisses it.
+    const bool surf_menu = g_hud.menu_visible &&
+                           strcmp(g_hud.menu_title, "Surf Live TV") == 0;
+    if (g_hud.visible && !surf_menu &&
         (timing_get_us() - g_hud.show_us) >= (paused ? HUD_SHOW_PAUSED_US : HUD_SHOW_US)) {
         g_hud.visible      = false;
         g_hud.focus        = -1;

@@ -310,6 +310,44 @@ static void live_stream_id_length(void) {
     CHECK(std::string(url).find(want) != std::string::npos);
 }
 
+static void wireless_live_budget(void) {
+    printf("- stability-first Wi-Fi Live TV transport budget\n");
+    const vquality_t qualities[] = {VQ_AUTO,VQ_1080P,VQ_720P,VQ_480P,VQ_360P,
+        VQ_ORIGINAL,VQ_1080P_20,VQ_1080P_25,VQ_1080P_30};
+    for (vquality_t q : qualities) {
+        for (int surround=0; surround<2; ++surround) {
+            for (int passthrough=0; passthrough<2; ++passthrough) {
+                Built b = {};
+                fill_tracks(&b.tracks);
+                b.p.quality=q; b.p.hd1080=true;
+                b.p.surround=surround; b.p.surround_hd=true;
+                b.p.passthrough=passthrough; b.p.budget=false;
+                b.p.display_w=1920; b.p.display_h=1080;
+                b.sel.item_id="CHAN0001"; b.sel.live=true; b.sel.wireless=true;
+                b.sel.tracks=&b.tracks; b.sel.cur_audio=GA_TRUEHD; b.sel.cur_sub=-1;
+                StreamRequest rq;
+                stream_request_resolve(&b.p,&b.sel,&rq);
+                unsigned cap=q==VQ_360P?700000u:1500000u;
+                CHECK(rq.vbitrate==cap);
+                CHECK(rq.max_h==(q==VQ_360P?360u:480u));
+                CHECK(rq.max_w==(q==VQ_360P?640u:854u));
+                CHECK(rq.no_video_copy && rq.budgeted);
+                CHECK(!rq.hd_codec && !rq.ac3_copy);
+                CHECK(rq.abitrate==(surround||passthrough?320000u:192000u));
+                CHECK((unsigned long long)rq.vreq+rq.abitrate<=cap*97u/100u);
+                // Wireless flag must not change VOD.
+                b.sel.live=false;
+                StreamRequest vod, wired;
+                stream_request_resolve(&b.p,&b.sel,&vod);
+                b.sel.wireless=false;
+                stream_request_resolve(&b.p,&b.sel,&wired);
+                CHECK(vod.vreq==wired.vreq && vod.max_h==wired.max_h &&
+                      vod.abitrate==wired.abitrate && vod.hd_codec==wired.hd_codec);
+            }
+        }
+    }
+}
+
 static void initial_selection(void) {
     printf("- initial selection\n");
     JFTracks t; fill_tracks(&t);
@@ -332,6 +370,7 @@ int main(void) {
     live_tv();
     live_stream_id_length();
     direct_stream_off();
+    wireless_live_budget();
     initial_selection();
     printf("%d checks, %d failed\n", s_checks, s_failed);
     return s_failed ? 1 : 0;

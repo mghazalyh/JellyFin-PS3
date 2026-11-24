@@ -935,7 +935,8 @@ void show_player_run(const JFItem *item, u32 resume_secs,
     // The quality row on the info screen overrides both; at its default
     // (Auto) vquality_params() resolves to exactly the two cases above, so
     // an install that never touches it requests what it always did.
-    vquality_params(live ? livetv_quality_get() : vquality_get(), hd1080_enabled(),
+    vquality_params(live ? stream_live_quality(livetv_quality_get(), http_net_wireless())
+                         : vquality_get(), hd1080_enabled(),
                     display_width, display_height,
                     &ps.req_w, &ps.req_h, NULL, NULL, NULL);
 
@@ -1618,7 +1619,7 @@ void show_player_run(const JFItem *item, u32 resume_secs,
         bool r2_pressed = BTN_PRESSED(r2);
         // START: the Options menu, as on the console's own player; START again
         // (or O) closes it.  O stops playback (hud_handle_input), picture or not.
-        if (BTN_PRESSED(start) && ps.frame_count > 0) {
+        if (BTN_PRESSED(start) && (ps.frame_count > 0 || g_prog.surf_mode[0])) {
             if (hud_menu_open()) {
                 hud_close_menu();
                 ps.menu_kind = PLAYER_MENU_NONE;

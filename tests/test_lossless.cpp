@@ -59,7 +59,7 @@ static std::vector<Bytes> audio_pes(MkvFile *f, int track, uint64_t start_ns, in
     // the PES still being assembled: flushed by a packet that starts another
     if (st->audio_pid) {
         uint8_t p[188]; memset(p, 0xFF, sizeof p);
-        p[0] = 0x47; p[1] = (uint8_t)(0x40 | (st->audio_pid >> 8)); p[2] = (uint8_t)st->audio_pid; p[3] = 0x10;
+        p[0] = 0x47; p[1] = (uint8_t)(0x40 | (st->audio_pid >> 8)); p[2] = (uint8_t)st->audio_pid; p[3] = (uint8_t)(0x10 | ((st->cc_last[1] + 1) & 15));
         p[4] = 0; p[5] = 0; p[6] = 1;
         int vlen = 0, alen = 0;
         if (ts_process(st, p, vpes, &vlen, apes, &alen) & 2) take(alen);

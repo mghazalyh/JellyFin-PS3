@@ -165,7 +165,7 @@ void player_display_frame(PlayerState *ps) {
         // the smoothed one lags ~10 frames, and acting on it after a reopen
         // (video ~1 s ahead of the new stream's sound) repeated a frame every
         // third vblank for two seconds -- stutter -- and overshot (2026-09-27).
-        const s64 raw = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us);
+        const s64 raw = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us, ps->live);
         static int  s_settle = 0;         // vblanks before another SMALL correction
         static bool s_holding = false;
         const s64 sm = avsync_get_smoothed_diff();
@@ -188,7 +188,7 @@ void player_display_frame(PlayerState *ps) {
                 // 3+ s out of lip sync for the whole film (2026-09-27).
                 int dropped = 0;
                 while (jbuf_count() > 1) {
-                    const s64 d = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us);
+                    const s64 d = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us, ps->live);
                     if (d > -40000) break;
                     jbuf_consume_dur(jbuf_peek_dur());
                     jbuf_advance();
@@ -217,7 +217,7 @@ one_to_one_done: ;
     } else if (!one_to_one && !ps->paused && s_vid_frame_ready && s_timing_ready && jbuf_count() > 0) {
         // Measurement only — result discarded; EMA updated for logging.
         // play_base lets avsync fold out an absolute (sub-burn) video PTS.
-        const s64 raw60 = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us);
+        const s64 raw60 = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us, ps->live);
         // Far behind (a stall or a slow start starved the picture while the
         // sound played on): drop the frames that are already late at once,
         // as the 1:1 path does.  The duration gate's bias moves at most 5 ms
@@ -225,7 +225,7 @@ one_to_one_done: ;
         if (raw60 < -150000 && raw60 > -10000000 && jbuf_count() > 1) {
             int dropped = 0;
             while (jbuf_count() > 1) {
-                const s64 d = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us);
+                const s64 d = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us, ps->live);
                 if (d > -40000) break;
                 jbuf_consume_dur(jbuf_peek_dur());
                 jbuf_advance();
@@ -469,7 +469,7 @@ one_to_one_done: ;
     // wedge on).  This keeps the loop under one vblank with the bar visible;
     // the old CPU-drawn HUD (fenced with rsxSync each frame) pushed it to a
     // 2-vblank cadence, halving playback fps whenever the seek bar showed.
-    if (hud_is_visible() && ps->frame_count > 0) {
+    if (hud_is_visible() && (ps->frame_count > 0 || (ps->live && hud_menu_open()))) {
         // While a seek is armed, show where the accumulated skip will land so
         // the user can keep tapping toward the right spot before it fires.
         hud_set_scrub_moving(ps->seek.state == SEEK_SCRUB || ps->seek.pending_secs != 0);

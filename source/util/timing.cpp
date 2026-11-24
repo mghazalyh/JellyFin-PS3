@@ -1,3 +1,4 @@
+#include "live_pts_delta.h"
 #include "timing.h"
 #include "audio.h"
 #include "plog.h"
@@ -243,7 +244,7 @@ static bool s_avsync_vbase_set = false;  // latched for the current stream?
 static const s64 AVSYNC_ABS_THRESH_US = 3000000;    // >3s ahead of audio clk => maybe absolute
 static const s64 AVSYNC_ABS_SLACK_US  = 15000000;   // and within a GOP or two of play_base
 
-s64 avsync_compute_diff(u64 video_pts_us, u64 play_base_us) {
+s64 avsync_compute_diff(u64 video_pts_us, u64 play_base_us, bool live) {
     if (video_pts_us == 0) return 0;
     // Only a real PTS can be compared with the video's.  The block count that
     // stands in before the first one says nothing about this stream's
@@ -253,9 +254,10 @@ s64 avsync_compute_diff(u64 video_pts_us, u64 play_base_us) {
     u64 audio_clk = audio_get_clock_us();
     if (audio_clk == 0) return 0;
     if (!s_avsync_vbase_set) {
-        const s64 gap  = (s64)video_pts_us - (s64)audio_clk;
+        const s64 gap  = live ? live_pts_delta_us(video_pts_us, audio_clk)
+                              : (s64)video_pts_us - (s64)audio_clk;
         const s64 miss = gap - (s64)play_base_us;
-        s_avsync_vbase_us  = (gap > AVSYNC_ABS_THRESH_US &&
+        s_avsync_vbase_us  = (!live && gap > AVSYNC_ABS_THRESH_US &&
                               miss < AVSYNC_ABS_SLACK_US && miss > -AVSYNC_ABS_SLACK_US)
                              ? (s64)play_base_us : 0;
         if (s_avsync_vbase_us == 0 && (gap > AVSYNC_ABS_THRESH_US || gap < -AVSYNC_ABS_THRESH_US)) {
@@ -277,7 +279,8 @@ s64 avsync_compute_diff(u64 video_pts_us, u64 play_base_us) {
     if (s_avsync_vbase_us != 0)
         video_pts_us = (video_pts_us > (u64)s_avsync_vbase_us)
                        ? video_pts_us - (u64)s_avsync_vbase_us : 0;
-    s64 raw_diff = (s64)video_pts_us - (s64)audio_clk;
+    s64 raw_diff = live ? live_pts_delta_us(video_pts_us, audio_clk)
+                        : (s64)video_pts_us - (s64)audio_clk;
     if (!s_avsync_initialized) {
         s_avsync_smooth_us   = raw_diff;
         s_avsync_initialized = true;

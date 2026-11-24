@@ -116,6 +116,7 @@ void      hud_set_menu_switch(const char *label);
 void      hud_set_menu_values(const char *const *values);
 // After hud_open_menu: put the cursor on `row` without moving the accent dot.
 void      hud_set_menu_cursor(int row);
+int       hud_menu_cursor(void);
 bool      hud_menu_open(void);
 void      hud_close_menu(void);
 

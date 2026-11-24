@@ -23,6 +23,7 @@
 #include "jellyfin_api.h"
 #include "jf_paths.h"
 #include "stream_request.h"
+#include "http.h"
 #include "directstream.h"
 
 // jellyfin_abudget.txt: 0 asks for the quality step as the VIDEO bitrate;
@@ -132,7 +133,8 @@ void player_stream_request(const PlayerState *ps, StreamRequest *rq) {
     }
     StreamSelection sel = { ps->item->id, player_current_source(ps),
                             &ps->tracks, ps->cur_audio, ps->cur_sub,
-                            ps->sub_is_text || ps->sub_is_pgs, ps->live };
+                            ps->sub_is_text || ps->sub_is_pgs, ps->live,
+                            ps->live && http_net_wireless() };
     stream_request_resolve(&prefs, &sel, rq);
     // The frame ceiling the jitter buffer was allocated for at open.  A seek
     // keeps it, so it can never ask for a different frame size.

@@ -60,7 +60,7 @@ EAC3_SRCS = ../source/audio/eac3_api.c $(FF_SHARED_SRCS) ../source/audio/mlp_api
 DTS_HD_DEPS = $(DTS_STREAM_SRC) $(DTS_MAP_SRC) $(DTS_EXSS_SRC) $(DCA_SRCS) \
               ../source/audio/truehd_map.c $(DCAHD_SRCS)
 
-all: test_flac_sign test_surf_gate test_surf_sync test_ts_continuity test_livetv_quality test_classic_library test_release_version test_login_osk test_login_drawn test_search_model test_sha256 test_release_asset test_auth_data test_wave_scope test_ac3_map test_ac3_decode test_iec61937 test_media_sources test_subtitles \
+all: test_flac_sign test_surf_gate test_surf_sync test_ts_continuity test_live_pts_delta test_livetv_quality test_classic_library test_release_version test_login_osk test_login_drawn test_search_model test_sha256 test_release_asset test_auth_data test_wave_scope test_ac3_map test_ac3_decode test_iec61937 test_media_sources test_subtitles \
      test_subtitles_pgs test_trickplay_info test_media_segments \
      test_dts_map test_dts_decode test_dts_stream test_dts_exss test_track_codec \
      test_truehd_map test_truehd_decode test_eac3_decode \
@@ -608,6 +608,7 @@ check: all tones51.ac3 tones51.spdif tones51.dts tones51.thd tones51.thd.ref ton
 	./test_surf_gate
 	./test_surf_sync
 	./test_ts_continuity
+	./test_live_pts_delta
 	./test_release_version
 	./test_login_osk
 	./test_login_drawn
@@ -716,7 +717,7 @@ check: all tones51.ac3 tones51.spdif tones51.dts tones51.thd tones51.thd.ref ton
 	$(MAKE) -f Makefile.host endian_music
 
 clean:
-	rm -f test_surf_gate test_surf_sync test_ts_continuity test_mkv_ts_*_p.o test_mp4_demux_*_p.o test_local_probe_*_p.o test_local_play_*_p.o
+	rm -f test_surf_gate test_surf_sync test_ts_continuity test_live_pts_delta test_mkv_ts_*_p.o test_mp4_demux_*_p.o test_local_probe_*_p.o test_local_play_*_p.o
 	rm -f test_livetv_quality
 	rm -f test_classic_library
 	rm -f test_release_version
@@ -1111,3 +1112,7 @@ test_surf_sync: test_surf_sync.cpp ../source/player/surf_sync.cpp ../source/play
 # Exercise native MPEG-TS loss, duplication, and discontinuity handling.
 test_ts_continuity: test_ts_continuity.cpp ../source/video/ts_demux.cpp ../source/video/ts_demux.h
 	$(CXX) $(CXXFLAGS) -Wextra -Ihoststub -I../source/video -I../source/util -o $@ test_ts_continuity.cpp ../source/video/ts_demux.cpp
+
+# Live 33-bit timestamp wrap compared against the PCM clock in microseconds.
+test_live_pts_delta: test_live_pts_delta.c ../source/util/live_pts_delta.h
+	$(CC) $(CFLAGS) -Wextra -o $@ $<

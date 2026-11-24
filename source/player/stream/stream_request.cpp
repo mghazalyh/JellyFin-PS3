@@ -25,7 +25,9 @@ void stream_request_resolve(const StreamPrefs *prefs,
 
     // Frame size, profile/level and bitrate step all come from the quality
     // ladder.  The display clamp only moves the sub-1080p steps' frame size.
-    vquality_params(prefs->quality, prefs->hd1080,
+    const bool wifi_live = sel->live && sel->wireless;
+    const vquality_t quality = stream_live_quality(prefs->quality, wifi_live);
+    vquality_params(quality, prefs->hd1080,
                     prefs->display_w, prefs->display_h,
                     &rq->max_w, &rq->max_h,
                     &rq->profile, &rq->level, &rq->vbitrate);
@@ -63,7 +65,7 @@ void stream_request_resolve(const StreamPrefs *prefs,
     // every seek rebuilds it from the same settings.
     const bool ac3 = prefs->surround || prefs->passthrough;
     rq->acodec   = ac3 ? "ac3"   : "mp3";
-    rq->abitrate = ac3 ? 640000u : 192000u;
+    rq->abitrate = ac3 ? (wifi_live ? 320000u : 640000u) : 192000u;
     rq->achans   = ac3 ? 6       : 2;
 
     // 5.1/7.1 prefers the source's own HD audio track, stream-copied by the
@@ -76,9 +78,9 @@ void stream_request_resolve(const StreamPrefs *prefs,
     // so the receiver gets the source frames; any other track takes the AC-3
     // transcode above.  Never a TrueHD or DTS copy in this mode.
     rq->hd_codec = NULL;
-    rq->ac3_copy = prefs->passthrough && have_audio &&
+    rq->ac3_copy = !wifi_live && prefs->passthrough && have_audio &&
                    track_label_is_ac3(t->audio[sel->cur_audio].label);
-    if (prefs->surround && prefs->surround_hd && have_audio && !prefs->passthrough) {
+    if (!wifi_live && prefs->surround && prefs->surround_hd && have_audio && !prefs->passthrough) {
         const char *label = t->audio[sel->cur_audio].label;
         if      (track_label_is_dts(label))    rq->hd_codec = "dts";
         else if (track_label_is_truehd(label)) rq->hd_codec = "truehd";
@@ -88,7 +90,7 @@ void stream_request_resolve(const StreamPrefs *prefs,
     // the TS framing come out of the video ceiling.  Direct play (step 0)
     // keeps no ceiling at all.
     rq->vreq = rq->vbitrate;
-    if (rq->vbitrate != 0 && prefs->budget) {
+    if (rq->vbitrate != 0 && (prefs->budget || wifi_live)) {
         int      kind     = STREAM_AUDIO_TRANSCODE;
         unsigned reported = rq->abitrate;
         if (rq->hd_codec) {

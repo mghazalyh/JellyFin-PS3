@@ -62,7 +62,15 @@ typedef struct {
     bool                 sub_on_console;   // cur_sub is drawn by this app (text
                                            // or PGS): no server burn-in
     bool                 live;        // a Live TV channel: item_id is the channel
+    bool                 wireless;    // actual console connection; only affects Live TV
 } StreamSelection;
+
+// Stability-first wireless Live TV ceiling: 480p/1.5 Mbps whole transport,
+// or the user's lower 360p choice. Do not apply this to wired or VOD.
+// This is a conservative policy, not a measured minimum Wi-Fi goodput.
+static inline vquality_t stream_live_quality(vquality_t q, bool wireless) {
+    return wireless && q != VQ_360P ? VQ_480P : q;
+}
 
 // A live channel has no source to copy from and no length: the video is
 // always transcoded, and "Original" quality means this ceiling.
