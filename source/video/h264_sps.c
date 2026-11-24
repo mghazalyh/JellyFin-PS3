@@ -41,13 +41,14 @@ static void skip_scaling_list(Bits *b, int size) {
     int last = 8, next = 8;
     for (int j = 0; j < size; j++) {
         if (next != 0) {
-            next = (last + get_se(b) + 256) % 256;
+            next = (int)(((int64_t)last + get_se(b)) & 255);
         }
         last = next ? next : last;
     }
 }
 
 bool h264_parse_sps(const uint8_t *nal, int len, H264SpsInfo *out) {
+    if (!nal || !out) return false;
     memset(out, 0, sizeof *out);
     if (len < 5 || (nal[0] & 0x1F) != 7) return false;
 
@@ -112,8 +113,15 @@ bool h264_parse_sps(const uint8_t *nal, int len, H264SpsInfo *out) {
     const int chroma = separate_planes ? 0 : out->chroma_format_idc;
     if (chroma == 1) { cux = 2; cuy = 2; } else if (chroma == 2) { cux = 2; cuy = 1; }
     if (!out->frame_mbs_only) cuy *= 2;
-    out->width  = (int)(mbs_w * 16u) - (int)((crop_l + crop_r) * (uint32_t)cux);
-    out->height = (int)(map_h * 16u * (out->frame_mbs_only ? 1u : 2u)) - (int)((crop_t + crop_b) * (uint32_t)cuy);
+    // Exp-Golomb crop offsets can exceed the entire coded image. Widen
+    // before summing and reject impossible geometry before narrowing.
+    const uint64_t cw = (uint64_t)mbs_w * 16u;
+    const uint64_t ch = (uint64_t)map_h * 16u * (out->frame_mbs_only ? 1u : 2u);
+    const uint64_t crop_x = ((uint64_t)crop_l + crop_r) * (uint64_t)cux;
+    const uint64_t crop_y = ((uint64_t)crop_t + crop_b) * (uint64_t)cuy;
+    if (crop_x >= cw || crop_y >= ch) return false;
+    out->width = (int)(cw - crop_x);
+    out->height = (int)(ch - crop_y);
 
     if (get1(&b)) {                                // vui_parameters_present
         if (get1(&b)) {                            // aspect_ratio_info_present

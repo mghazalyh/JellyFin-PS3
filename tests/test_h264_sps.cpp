@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <vector>
 
 static int s_checks = 0, s_failed = 0;
 #define CHECK(cond) do { s_checks++; if (!(cond)) { s_failed++; \
@@ -99,6 +100,8 @@ static void garbage() {
     printf("- not an SPS\n");
     H264SpsInfo s;
     CHECK(!h264_parse_sps(nullptr, 0, &s));
+    CHECK(!h264_parse_sps(nullptr, 12, &s));
+    CHECK(!h264_parse_sps(FIX[0].nal, FIX[0].len, nullptr));
     unsigned char pps[] = { 0x68, 0xce, 0x3c, 0x80 };
     CHECK(!h264_parse_sps(pps, sizeof pps, &s));                            // a PPS
     CHECK(!h264_parse_sps(FIX[0].nal, 3, &s));                              // cut short
@@ -116,10 +119,65 @@ static void garbage() {
     CHECK(parsed >= NFIX);                                                 // at least the whole ones
 }
 
+// Construct a baseline SPS with independently encoded unsigned Exp-Golomb values.
+struct SpsBits {
+    std::vector<unsigned char> rbsp;
+    unsigned bit = 0;
+    void put(unsigned value) {
+        if ((bit & 7) == 0) rbsp.push_back(0);
+        rbsp.back() |= (value & 1u) << (7 - (bit++ & 7));
+    }
+    void bits(uint32_t value, unsigned count) {
+        while (count) put(value >> --count);
+    }
+    void ue(uint32_t value) {
+        uint64_t code = (uint64_t)value + 1;
+        unsigned width = 0;
+        for (uint64_t x=code; x; x >>= 1) ++width;
+        for (unsigned i=1; i<width; ++i) put(0);
+        while (width) put((unsigned)(code >> --width));
+    }
+    std::vector<unsigned char> nal() const {
+        std::vector<unsigned char> result(1, 0x67);
+        unsigned zeros=0;
+        for (unsigned char b: rbsp) {
+            if (zeros >= 2 && b <= 3) { result.push_back(3); zeros=0; }
+            result.push_back(b);
+            zeros = b == 0 ? zeros+1 : 0;
+        }
+        return result;
+    }
+};
+static std::vector<unsigned char> cropped_sps(uint32_t left, uint32_t right,
+                                              uint32_t top, uint32_t bottom) {
+    SpsBits b;
+    b.bits(66,8); b.bits(0,8); b.bits(41,8);
+    b.ue(0); b.ue(0); b.ue(0); b.ue(0); b.ue(1);
+    b.put(0); b.ue(119); b.ue(67); // 1920x1088 coded
+    b.put(1); b.put(1); b.put(1);
+    b.ue(left); b.ue(right); b.ue(top); b.ue(bottom);
+    b.put(0); b.put(1);
+    return b.nal();
+}
+static void crop_bounds() {
+    H264SpsInfo s;
+    auto valid = cropped_sps(0,0,0,4);
+    CHECK(h264_parse_sps(valid.data(), (int)valid.size(), &s));
+    CHECK(s.width==1920 && s.height==1080);
+    auto invalid = cropped_sps(0x80000000u,0x80000000u,0,4);
+    CHECK(!h264_parse_sps(invalid.data(), (int)invalid.size(), &s));
+    invalid = cropped_sps(0,0,0x80000000u,0x80000000u);
+    CHECK(!h264_parse_sps(invalid.data(), (int)invalid.size(), &s));
+    invalid = cropped_sps(960,0,0,0);
+    CHECK(!h264_parse_sps(invalid.data(), (int)invalid.size(), &s));
+    invalid = cropped_sps(0,0,545,0);
+    CHECK(!h264_parse_sps(invalid.data(), (int)invalid.size(), &s));
+}
 int main() {
     fixtures();
     playability();
     garbage();
+    crop_bounds();
     printf("h264 sps: %d checks, %d failed\n", s_checks, s_failed);
     return s_failed ? 1 : 0;
 }
