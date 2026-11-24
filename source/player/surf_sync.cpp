@@ -39,6 +39,7 @@ static bool s_have_luma = false, s_cut_found = false;
 static u8 s_luma[64] = {0};
 static u32 s_last_luma_seq = 0, s_candidate_seq = 0;
 static u32 s_flip_seq = 0;
+static bool s_flip_qualified = false;
 static u64 s_candidate_pts = 0;
 static u64 s_gate_at = 0;
 static unsigned s_cut_avg = 0, s_cut_changed = 0;
@@ -75,8 +76,8 @@ bool surf_sync_take_event(SurfSyncEvent *out) {
 
 void surf_sync_session(const char *mode, u32 generation) {
     // The old audio ring must never stay muted in a new playback.
-    audio_set_transition_gate(false);
     lock_state();
+    audio_set_transition_gate(false);
     s_active = mode && mode[0];
     s_enabled = false;
     snprintf(s_mode, sizeof s_mode, "%s", mode ? mode : "");
@@ -87,6 +88,7 @@ void surf_sync_session(const char *mode, u32 generation) {
     s_transition_pending = s_gating = false;
     s_have_luma = s_cut_found = false;
     s_last_luma_seq = s_candidate_seq = s_flip_seq = 0;
+    s_flip_qualified = false;
     s_candidate_pts = s_gate_at = 0;
     s_ev_read = s_ev_write = 0;
     unlock_state();
@@ -101,12 +103,13 @@ void surf_sync_set_enabled(bool enabled) {
         s_transition_pending = false;
         s_gating = false;
         s_cut_found = false;
+        s_flip_qualified = false;
+        audio_set_transition_gate(false);
         changed = true;
         event_locked("source_changed", next ? "sync_beta_enabled" : "sync_beta_disabled");
     }
     unlock_state();
     if (changed) {
-        audio_set_transition_gate(false);
         plog(next ? "surf_sync: experimental PCM sync ENABLED" :
                     "surf_sync: experimental PCM sync DISABLED");
     }
@@ -122,9 +125,10 @@ void surf_sync_stop(void) {
     lock_state();
     s_active = false; s_transition_pending = false;
     s_gating = false; s_have_source = false;
+    s_flip_qualified = false;
+    audio_set_transition_gate(false);
     s_ev_read = s_ev_write = 0;
     unlock_state();
-    audio_set_transition_gate(false);
 }
 
 void surf_sync_observe_source(const char *mode, const char *source,
@@ -152,6 +156,8 @@ void surf_sync_observe_source(const char *mode, const char *source,
         s_epoch++;
         epoch = s_epoch;
         s_transition_pending = s_enabled;
+        // Superseding a transition invalidates every unconfirmed flip and cut.
+        s_flip_qualified = false;
         s_cut_found = false;
         event_locked("source_changed", s_enabled ? "transition_observed" :
                                                   "observed_sync_disabled");
@@ -174,10 +180,15 @@ void surf_sync_display_tick(bool paused) {
     lock_state();
     if (s_active && s_enabled && s_transition_pending && !paused) {
         s_transition_pending = false;
+        const bool already_gated = s_gating;
         s_gating = !audio_passthrough_active();
-        s_gate_at = now;
-            s_cut_found = false;
+        // Repeated rotations cannot indefinitely extend a continuous mute.
+        if (!already_gated) s_gate_at = now;
+        s_cut_found = false;
+        s_flip_qualified = false;
         s_have_luma = false;
+        // Atomic flag only; serialize it with the state transition.
+        audio_set_transition_gate(s_gating);
         start = s_gating;
         epoch = s_epoch;
         event_locked("source_changed", start ? "audio_gate_started" :
@@ -188,6 +199,8 @@ void surf_sync_display_tick(bool paused) {
     if (s_active && s_enabled && s_gating && !paused &&
         now >= s_gate_at && now - s_gate_at >= 3000000ULL) {
         s_gating = false;
+        s_flip_qualified = false;
+        audio_set_transition_gate(false);
         release = true;
         age_ms = (now - s_gate_at) / 1000ULL;
         epoch = s_epoch;
@@ -195,13 +208,11 @@ void surf_sync_display_tick(bool paused) {
     }
     unlock_state();
     if (start) {
-        audio_set_transition_gate(true);
         char b[100];
         snprintf(b, sizeof b, "surf_sync: epoch=%u pcm_gate=ON", (unsigned)epoch);
         plog(b);
     }
     if (release) {
-        audio_set_transition_gate(false);
         char b[110];
         snprintf(b, sizeof b, "surf_sync: epoch=%u timeout=%llums pcm_gate=OFF",
                  (unsigned)epoch, (unsigned long long)age_ms);
@@ -221,7 +232,8 @@ void surf_sync_probe_video(const u8 *y, u32 width, u32 height, u32 sequence,
         }
     }
     lock_state();
-    if (s_active && s_enabled && sequence != s_last_luma_seq) {
+    if (s_active && s_enabled && !s_transition_pending &&
+        (!s_have_luma || sequence != s_last_luma_seq)) {
         if (s_gating && s_have_luma && !s_cut_found) {
             unsigned avg = 0, changed = 0;
             if (surf_cut_detect(s_luma, now, 64, &avg, &changed)) {
@@ -242,28 +254,35 @@ void surf_sync_probe_video(const u8 *y, u32 width, u32 height, u32 sequence,
 void surf_sync_flip_queued(u32 sequence, u64 pts_us) {
     lock_state();
     s_flip_seq = sequence;
+    // Qualify the submitted picture now, not retroactively on completion.
+    s_flip_qualified = s_active && s_enabled && s_gating &&
+                       !s_transition_pending && s_cut_found &&
+                       surf_seq_reached(sequence, s_candidate_seq);
     (void)pts_us;
     unlock_state();
 }
 
 void surf_sync_flip_completed(bool success) {
-    if (!success) return;
     bool release = false;
     u32 epoch = 0, seq = 0, avg = 0, changed = 0;
     u64 pts = 0, duration = 0;
     lock_state();
-    if (s_active && s_enabled && s_gating && s_cut_found &&
+    const bool qualified = s_flip_qualified;
+    s_flip_qualified = false;  // Consume once, even if the flip failed.
+    if (success && qualified && s_active && s_enabled && s_gating &&
+        !s_transition_pending && s_cut_found &&
         surf_seq_reached(s_flip_seq, s_candidate_seq)) {
         s_gating = false;
+        audio_set_transition_gate(false);
         release = true; epoch = s_epoch;
         seq = s_flip_seq; pts = s_candidate_pts;
         avg = s_cut_avg; changed = s_cut_changed;
-        duration = timing_get_us() - s_gate_at;
+        const u64 now = timing_get_us();
+        duration = now >= s_gate_at ? now - s_gate_at : 0;
         event_locked("source_changed", "video_flip_audio_release");
     }
     unlock_state();
     if (release) {
-        audio_set_transition_gate(false);
         char b[128];
         snprintf(b, sizeof b,
                  "surf_sync: epoch=%u flip_done seq=%u pts=%lluus gate=%llums cut=%u/%u",

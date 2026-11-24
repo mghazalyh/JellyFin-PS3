@@ -114,7 +114,7 @@ static void audio_choice() {
     CHECK(demux(hd, other).audio_pes > 0);
 }
 
-static void clock() {
+static void test_local_clock() {
     printf("- the clock of a file entered part way\n");
     StreamLocalIndex idx;
     memset(&idx, 0, sizeof idx);
@@ -175,7 +175,7 @@ static void clock() {
 
 int main() {
     audio_choice();
-    clock();
+    test_local_clock();
     printf("local play: %d checks, %d failed\n", s_checks, s_failed);
     return s_failed ? 1 : 0;
 }
