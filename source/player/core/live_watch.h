@@ -130,9 +130,11 @@ static inline void live_watch_opened(LiveWatch *w, uint64_t now_us) {
     w->paused_at_us   = 0;
 }
 
-// Another channel: the limit on stall reopens starts again.
+// Another channel is a new stream: its reopen limits start again, and the
+// old channel's quick-reopen streak must not end playback on the new one.
 static inline void live_watch_channel_changed(LiveWatch *w) {
     w->reconnect_us = 0;
     w->window_us    = 0;
     w->reconnects   = 0;
+    w->quick_opens  = 0;
 }

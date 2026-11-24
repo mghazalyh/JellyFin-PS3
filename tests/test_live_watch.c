@@ -109,6 +109,45 @@ static void ended(void) {
     CHECK(live_watch_step(&w, S(4), false, 3, true, 0) == LIVE_EV_ENDED);
 }
 
+// A new channel is a new stream: neither the quick-reopen streak nor the
+// stall-reconnect budget of the old one may follow it.
+static void channel_transition(void) {
+    printf("- channel transition\n");
+    LiveWatch w; live_watch_init(&w, S(0));
+    // Two quick reopens of the old stream.
+    CHECK(!live_watch_looping(&w, S(1)));
+    live_watch_opened(&w, S(1));
+    CHECK(!live_watch_looping(&w, S(2)));
+    live_watch_opened(&w, S(2));
+    // The user picks another channel.  Its first ended stream and its second
+    // are its own; playback must not stop on them as if the old streak went on.
+    live_watch_channel_changed(&w);
+    live_watch_opened(&w, S(3));
+    CHECK(!live_watch_looping(&w, S(4)));
+    live_watch_opened(&w, S(4));
+    CHECK(!live_watch_looping(&w, S(5)));
+    live_watch_opened(&w, S(5));
+    // Three in a row on the same new channel still stops playback.
+    CHECK(live_watch_looping(&w, S(6)));
+
+    // The stall limit is per channel too: two reopens used up, then a channel
+    // change, and the new channel's first stall may reopen at once.
+    live_watch_init(&w, S(0));
+    CHECK(live_watch_step(&w, S(0), false, 1, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_step(&w, S(6) + 1, false, 1, false, 0) == LIVE_EV_STALLED);
+    live_watch_opened(&w, S(7));
+    CHECK(live_watch_step(&w, S(7), false, 1, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_step(&w, S(27) + 2, false, 1, false, 0) == LIVE_EV_STALLED);
+    live_watch_opened(&w, S(28));
+    // The third stall in the same minute waits.
+    CHECK(live_watch_step(&w, S(28), false, 1, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_step(&w, S(48) + 1, false, 1, false, 0) == LIVE_EV_NONE);
+    live_watch_channel_changed(&w);
+    live_watch_opened(&w, S(50));
+    CHECK(live_watch_step(&w, S(50), false, 1, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_step(&w, S(56) + 1, false, 1, false, 0) == LIVE_EV_STALLED);
+}
+
 static void looping(void) {
     printf("- loop\n");
     LiveWatch w; live_watch_init(&w, S(0));
@@ -177,6 +216,25 @@ static void pcr(void) {
     CHECK(live_pcr_ms(&p) == 0);
 }
 
+// A seek/reopen starts a fresh watchdog: the old stream's stall baseline and
+// pause time belong to the stream that was closed, not the new one.
+static void reopen(void) {
+    printf("- reopen\n");
+    LiveWatch w; live_watch_init(&w, S(0));
+    CHECK(live_watch_step(&w, S(1), false, 5, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_step(&w, S(7) + 1, false, 5, false, 0) == LIVE_EV_STALLED);
+    live_watch_opened(&w, S(30));
+    CHECK(live_watch_step(&w, S(31), false, 5, false, 0) == LIVE_EV_NONE);
+    // Five seconds into the new stream is not the old stream's sixth.
+    CHECK(live_watch_step(&w, S(36), false, 5, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_step(&w, S(37) + 1, false, 5, false, 0) == LIVE_EV_STALLED);
+    // A pause that a reopen ended is not a stale resume afterwards.
+    live_watch_opened(&w, S(38));
+    CHECK(live_watch_step(&w, S(39), true, 0, false, 0) == LIVE_EV_NONE);
+    live_watch_opened(&w, S(55));
+    CHECK(live_watch_step(&w, S(56), false, 0, false, 0) == LIVE_EV_NONE);
+}
+
 int main(void) {
     CHECK(live_buffer_seconds(0) == 4 && live_buffer_seconds(1) == 8 && live_buffer_seconds(2) == 15);
     CHECK(live_buffer_seconds(-1) == 8 && live_buffer_seconds(3) == 8);
@@ -200,6 +258,8 @@ int main(void) {
     sound_on();
     reconnect_limit();
     ended();
+    channel_transition();
+    reopen();
     looping();
     printf("live watch: %d checks, %d failed\n", s_checks, s_failed);
     return s_failed ? 1 : 0;

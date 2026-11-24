@@ -42,6 +42,8 @@ static u32 s_flip_seq = 0;
 static bool s_flip_qualified = false;
 static u64 s_candidate_pts = 0;
 static u64 s_gate_at = 0;
+static bool s_paused = false;
+static u64 s_pause_at = 0;
 static unsigned s_cut_avg = 0, s_cut_changed = 0;
 
 
@@ -90,6 +92,7 @@ void surf_sync_session(const char *mode, u32 generation) {
     s_last_luma_seq = s_candidate_seq = s_flip_seq = 0;
     s_flip_qualified = false;
     s_candidate_pts = s_gate_at = 0;
+    s_paused = false; s_pause_at = 0;
     s_ev_read = s_ev_write = 0;
     unlock_state();
 }
@@ -126,6 +129,7 @@ void surf_sync_stop(void) {
     s_active = false; s_transition_pending = false;
     s_gating = false; s_have_source = false;
     s_flip_qualified = false;
+    s_paused = false; s_pause_at = 0;
     audio_set_transition_gate(false);
     s_ev_read = s_ev_write = 0;
     unlock_state();
@@ -178,6 +182,16 @@ void surf_sync_display_tick(bool paused) {
     u32 epoch = 0;
     const u64 now = timing_get_us();
     lock_state();
+    // A pause is not an observation window.  Freeze the recovery ceiling while
+    // paused and carry that duration forward on resume, otherwise returning
+    // from a long pause would immediately count as an expired timeout and
+    // release PCM before any new picture had a chance to arrive.
+    if (paused) {
+        if (!s_paused) { s_paused = true; s_pause_at = now; }
+    } else if (s_paused) {
+        if (s_gating && now >= s_pause_at) s_gate_at += now - s_pause_at;
+        s_paused = false;
+    }
     if (s_active && s_enabled && s_transition_pending && !paused) {
         s_transition_pending = false;
         const bool already_gated = s_gating;
