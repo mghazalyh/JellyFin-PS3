@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "player_internal.h"
 #include "plog.h"
@@ -227,10 +228,11 @@ static bool surf_token_valid(const char *token) {
 
 static bool surf_recent_next(const char *json, const char *selected_token,
                              char *source, size_t source_cap,
-                             char *token, size_t token_cap) {
-    if (!json || !source || !token) return false;
-    source[0] = '\0';
-    token[0] = '\0';
+                             char *token, size_t token_cap,
+                             char *source_id, size_t id_cap) {
+    if (!json || !source || !source_cap || !token || !token_cap ||
+        !source_id || !id_cap) return false;
+    source[0] = token[0] = source_id[0] = '\0';
     const char *list = strstr(json, "\"recent_sources\"");
     if (!list || !(list = strchr(list, '['))) return false;
     const char *end = surf_json_array_end(list);
@@ -238,6 +240,7 @@ static bool surf_recent_next(const char *json, const char *selected_token,
     struct SurfHistoryEntry {
         char source[152];
         char token[40];
+        char source_id[257];
     } entries[16];
     int count = 0;
     for (const char *pos = list + 1; pos < end && count < 16;) {
@@ -255,14 +258,15 @@ static bool surf_recent_next(const char *json, const char *selected_token,
         if (pos >= end) break;
         const size_t n = (size_t)(pos - begin + 1);
         pos++;
-        if (n > 580) continue;
-        char object[584];
+        if (n > 1023) continue;
+        char object[1024];
         memcpy(object, begin, n);
         object[n] = '\0';
         SurfHistoryEntry item = {};
         if (!json_get_string(object, "source", item.source, sizeof item.source) ||
             !json_get_string(object, "token", item.token, sizeof item.token) ||
-            !item.source[0] || !surf_token_valid(item.token)) continue;
+            !json_get_string(object, "source_id", item.source_id, sizeof item.source_id) ||
+            !item.source[0] || !item.source_id[0] || !surf_token_valid(item.token)) continue;
         entries[count++] = item;
     }
     if (count == 0) return false;
@@ -274,8 +278,12 @@ static bool surf_recent_next(const char *json, const char *selected_token,
                 break;
             }
     }
+    if (strlen(entries[next].source) >= source_cap ||
+        strlen(entries[next].token) >= token_cap ||
+        strlen(entries[next].source_id) >= id_cap) return false;
     snprintf(source, source_cap, "%s", entries[next].source);
     snprintf(token, token_cap, "%s", entries[next].token);
+    snprintf(source_id, id_cap, "%s", entries[next].source_id);
     return true;
 }
 
@@ -310,12 +318,13 @@ static void surf_send_client_event(const SurfActionJob *job,
 static void surf_action_worker(void *arg) {
     SurfActionJob *job = static_cast<SurfActionJob*>(arg);
     char reply[8192] = "";
-    char payload[580] = "{}";
+    char payload[1152] = "{}";
     char result[144] = "Surf control request failed";
     char action_url[360] = "";
     char current[152] = "";
     char new_source[152] = "";
     char new_token[40] = "";
+    char new_id[257] = "";
     bool new_selection = false;
     bool selected_valid = false;
     int status = 0;
@@ -361,12 +370,23 @@ static void surf_action_worker(void *arg) {
         } else if (previous) {
             if (surf_recent_next(reply, job->previous_token,
                                  new_source, sizeof new_source,
-                                 new_token, sizeof new_token)) {
-                snprintf(result, sizeof result, "Previous: %.124s", new_source);
-                new_selection = true;
-                selected_valid = true;
-                surf_send_client_event(job, "previous_clicked",
-                                       "", new_source, status);
+                                 new_token, sizeof new_token,
+                                 new_id, sizeof new_id)) {
+                char escaped[304], escaped_id[514];
+                if (!surf_json_escape(new_source, escaped, sizeof escaped) ||
+                    !surf_json_escape(new_id, escaped_id, sizeof escaped_id)) {
+                    valid = false;
+                    snprintf(result, sizeof result, "%s", "Invalid previous source identity");
+                } else {
+                    const int n = snprintf(payload, sizeof payload,
+                        "{\"source\":\"%s\",\"source_id\":\"%s\","
+                        "\"previous_token\":\"%s\",\"trace\":\"%s\"}",
+                        escaped, escaped_id, new_token, job->trace);
+                    if (n <= 0 || (size_t)n >= sizeof payload) {
+                        valid = false;
+                        snprintf(result, sizeof result, "%s", "Previous request too long");
+                    }
+                }
             } else {
                 snprintf(result, sizeof result, "%s", "No previous playable channel");
                 valid = false;
@@ -398,6 +418,52 @@ static void surf_action_worker(void *arg) {
     // Favoriting takes priority over best-effort telemetry. Posting telemetry
     // first can allow the server to rotate before the requested favorite.
 
+    if (valid && previous) {
+        const int n = snprintf(action_url, sizeof action_url, "%s/previous", job->base_url);
+        if (n <= 0 || (size_t)n >= sizeof action_url ||
+            g_prog.gen != job->generation || !g_prog.playing) {
+            snprintf(result, sizeof result, "%s", "Previous request cancelled");
+        } else {
+            status = http_request(HTTP_POST, action_url, payload, job->token, reply, sizeof reply);
+            surf_send_client_event(job, "previous_clicked", "", new_source, status);
+            if (status >= 200 && status < 300) {
+                // A queued command is not success. Wait for matching server source
+                // identity in playing state. The existing HTTP timeout bounds each
+                // request; a slow request can exceed this polling deadline.
+                const u64 deadline = timing_get_us() + 30000000ULL;
+                bool confirmed = false;
+                while (g_prog.gen == job->generation && g_prog.playing &&
+                       timing_get_us() < deadline) {
+                    reply[0] = '\0';
+                    status = http_request(HTTP_GET, job->base_url, NULL,
+                                          job->token, reply, sizeof reply);
+                    char state[32] = "", active_id[257] = "";
+                    if (status == 200 &&
+                        json_get_string(reply, "state", state, sizeof state) &&
+                        json_get_string(reply, "source_id", active_id, sizeof active_id) &&
+                        !strcmp(state, "playing") && !strcmp(active_id, new_id)) {
+                        confirmed = true;
+                        break;
+                    }
+                    if (status == 401 || status == 403) break;
+                    usleep(500000);
+                }
+                if (confirmed) {
+                    // The selected source is now Current. Do not reuse its old
+                    // history token for a subsequent Favorite.
+                    new_selection = true;
+                    selected_valid = false;
+                    snprintf(result, sizeof result, "Server playing: %.118s", new_source);
+                    surf_send_client_event(job, "source_changed", new_source, "", 200);
+                } else {
+                    snprintf(result, sizeof result, "%s",
+                             "Previous accepted; playback not confirmed");
+                }
+            } else {
+                snprintf(result, sizeof result, "Previous failed (HTTP %d)", status);
+            }
+        }
+    }
     if (post_action || (valid && favorite_current)) {
         const char *method = favorite_previous ? "favorite" : job->action;
         const int n = snprintf(action_url, sizeof action_url,
@@ -490,8 +556,10 @@ static void surf_action(PlayerState *ps, const char *action) {
     snprintf(job->action, sizeof job->action, "%s", action);
     job->generation = g_prog.gen;
     job->menu_epoch = s_surf_menu_epoch;
-    snprintf(job->trace, sizeof job->trace, "ps3_%08x_%08x",
-             (unsigned)timing_get_us(), (unsigned)ps->frame_count);
+    char prefix[24];
+    surf_sync_trace_prefix(prefix, sizeof prefix);
+    snprintf(job->trace, sizeof job->trace, "%s_%08x", prefix,
+             (unsigned)timing_get_us());
     if (strcmp(s_surf_selected_mode, mode) != 0) {
         s_surf_selected_source[0] = '\0';
         s_surf_selected_token[0] = '\0';
@@ -579,7 +647,7 @@ void player_open_options(PlayerState *ps, int row) {
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Continue channel rotation"); n++;
         s_opt_kind[n] = OPT_SURF_FAVORITE; s_opt_items[n] = "Favorite Current Channel";
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Server source, not buffered picture"); n++;
-        s_opt_kind[n] = OPT_SURF_PREVIOUS; s_opt_items[n] = "Select Previous Channel";
+        s_opt_kind[n] = OPT_SURF_PREVIOUS; s_opt_items[n] = "Play Previous Channel";
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
                  s_surf_selected_source[0] ? s_surf_selected_source : "Cycle playable history"); n++;
         s_opt_kind[n] = OPT_SURF_FAVORITE_PREVIOUS;

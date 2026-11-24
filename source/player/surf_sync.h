@@ -1,11 +1,15 @@
 #pragma once
 #include <ppu-types.h>
+#include <stddef.h>
 
 // A source change is observed on the progress reporter's network thread.
 // A picture discontinuity is measured on the upload thread. Only the main
 // display loop may confirm an actually completed flip and release the gate.
 void surf_sync_session(const char *mode, u32 generation);
 void surf_sync_stop(void);
+void surf_sync_reconnect(const char *mode, u32 generation);
+void surf_sync_health_event(const char *event, const char *reason);
+void surf_sync_trace_prefix(char *out, size_t cap);
 void surf_sync_set_enabled(bool enabled);
 bool surf_sync_enabled(void);
 void surf_sync_observe_source(const char *mode, const char *source,

@@ -14,11 +14,13 @@ While watching **Surf: All Channels**, **Surf: Sports** or **Surf: Movies & Seri
    continues automatic rotation.
 4. **Favorite Current Channel** requests a Favorite for the currently published
    Surf source, not necessarily the frame still buffered by the decoder.
-5. **Select Previous Channel** cycles the server's recent successfully played
-   sources. **Favorite Selected Previous** uses the selected source and immutable
-   32-character token; it does not change playback or silently select a new
-   source after rotation.
-6. **Select Current Channel** clears the Previous selection.
+5. **Play Previous Channel** submits the exact historical source name, ID and
+   immutable token to the authenticated Catalog Previous endpoint. A successful
+   HTTP response is only acceptance; confirmation requires the server to report
+   that exact source ID in playing state. This affects every viewer of that
+   Surf mode. It does not prove the native decoder has presented the source.
+6. **Select Current Channel** clears the Previous selection. After a confirmed
+   switch use Favorite Current Channel; the old historical token is cleared.
 7. **Show Surf Source Status** displays the current publishing source.
 
 A Favorites success message requires HTTP success from CatalogService, which

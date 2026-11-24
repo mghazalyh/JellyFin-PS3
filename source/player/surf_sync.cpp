@@ -32,6 +32,7 @@ static u32 fnv1a(const char *s) {
 static bool s_active = false, s_have_source = false;
 static bool s_enabled = false; // per session, opt-in by controller
 static u32 s_generation = 0, s_epoch = 0;
+static u32 s_session_nonce = 0, s_connection = 0;
 static u32 s_source_hash = 0, s_boot_hash = 0;
 static char s_mode[24], s_source[152];
 static bool s_transition_pending = false, s_gating = false;
@@ -58,8 +59,9 @@ static void event_locked(const char *event, const char *state) {
     snprintf(e->event, sizeof e->event, "%s", event);
     snprintf(e->mode, sizeof e->mode, "%s", s_mode);
     snprintf(e->source, sizeof e->source, "%s", s_source);
-    snprintf(e->trace, sizeof e->trace, "ps3e%08x_%04u",
-             (unsigned)s_source_hash, (unsigned)s_epoch);
+    snprintf(e->trace, sizeof e->trace, "ps3p%08x%08x_%04x_%04x",
+             (unsigned)s_session_nonce, (unsigned)s_generation,
+             (unsigned)(s_connection & 0xffffu), (unsigned)(s_epoch & 0xffffu));
     snprintf(e->state, sizeof e->state, "%s", state);
     s_ev_write = next;
 }
@@ -74,12 +76,34 @@ bool surf_sync_take_event(SurfSyncEvent *out) {
     return true;
 }
 
-void surf_sync_session(const char *mode, u32 generation) {
+void surf_sync_health_event(const char *event, const char *reason) {
+    if (!event || !reason) return;
+    lock_state();
+    if (s_active) event_locked(event, reason);
+    unlock_state();
+}
+
+void surf_sync_trace_prefix(char *out, size_t cap) {
+    if (!out || !cap) return;
+    lock_state();
+    snprintf(out, cap, "ps3p%08x%08x", (unsigned)s_session_nonce, (unsigned)s_generation);
+    unlock_state();
+}
+
+static void sync_session(const char *mode, u32 generation, bool reconnect) {
     // The old audio ring must never stay muted in a new playback.
     lock_state();
     audio_set_transition_gate(false);
+    const bool same = reconnect && s_active && mode && !strcmp(mode, s_mode) &&
+                      generation == s_generation;
+    if (same) {
+        ++s_connection;
+    } else {
+        s_session_nonce = (u32)timing_get_us();
+        s_connection = 0;
+    }
     s_active = mode && mode[0];
-    s_enabled = false;
+    s_enabled = same && s_enabled;
     snprintf(s_mode, sizeof s_mode, "%s", mode ? mode : "");
     s_source[0] = '\0';
     s_generation = generation;
@@ -90,8 +114,16 @@ void surf_sync_session(const char *mode, u32 generation) {
     s_last_luma_seq = s_candidate_seq = s_flip_seq = 0;
     s_flip_qualified = false;
     s_candidate_pts = s_gate_at = 0;
-    s_ev_read = s_ev_write = 0;
+    if (!same) s_ev_read = s_ev_write = 0;
+    if (same) event_locked("playback_started", "stream_reopened");
     unlock_state();
+}
+
+void surf_sync_session(const char *mode, u32 generation) {
+    sync_session(mode, generation, false);
+}
+void surf_sync_reconnect(const char *mode, u32 generation) {
+    sync_session(mode, generation, true);
 }
 
 void surf_sync_set_enabled(bool enabled) {

@@ -1592,6 +1592,10 @@ void show_player_run(const JFItem *item, u32 resume_secs,
     u64       live_hud_us   = 0;
     LiveWatch live_w;
     live_watch_init(&live_w, timing_get_us());
+    SurfPresentationWatch surf_present;
+    surf_present_init(&surf_present, timing_get_us());
+    u64 surf_health_at = timing_get_us();
+    int surf_health_frames = 0;
 
     // ---- Main (display) loop ----
     while (running && ps.playing && !s_vdec_error) {
@@ -1600,7 +1604,10 @@ void show_player_run(const JFItem *item, u32 resume_secs,
         // black screen for good (hardware, 2026-09-27).  A normal flip lands
         // within one vblank, so 250 ms only ever fires in that case.
         const bool flip_done = !flip_queued || waitflip_timeout(250000);
-        if (flip_queued && g_prog.surf_mode[0]) surf_sync_flip_completed(flip_done);
+        if (flip_queued && g_prog.surf_mode[0]) {
+            surf_present_complete(&surf_present, flip_done);
+            surf_sync_flip_completed(flip_done);
+        }
         if (flip_queued && !flip_done) {
             static bool s_logged = false;
             if (!s_logged) { plog("player: flip wait timed out; continuing"); s_logged = true; }
@@ -1821,9 +1828,32 @@ void show_player_run(const JFItem *item, u32 resume_secs,
 
         if (live && !live_label) {
             const u64 now_lv = timing_get_us();
-            const LiveEvent ev = live_watch_step(&live_w, now_lv, ps.paused, ps.frame_count,
-                                                 ps.stream_ended,
-                                                 audio_clock_valid() ? audio_get_clock_us() : 0);
+            const bool surf_live = g_prog.surf_mode[0] != '\0';
+            const u64 audio_us = audio_clock_valid() ? audio_get_clock_us() : 0;
+            const LiveEvent ev = surf_live
+                ? live_watch_surf_step(&live_w, &surf_present, now_lv, ps.paused,
+                                       ps.stream_ended, audio_us)
+                : live_watch_step(&live_w, now_lv, ps.paused, ps.frame_count,
+                                  ps.stream_ended, audio_us);
+            if (surf_live && ev != LIVE_EV_NONE) {
+                const char *reason = ev == LIVE_EV_ENDED ? "stream_ended" :
+                    ev == LIVE_EV_RESUME_STALE ? "resume_stale" :
+                    !surf_present.have_presented ? "startup_no_picture" :
+                    "presentation_stall";
+                char diag[128];
+                snprintf(diag, sizeof diag,
+                    "surf_watch: %s presented=%d staged=%d q=%d ring=%d flip_fail=%u",
+                    reason, surf_present.confirmed, ps.frame_count, jbuf_count(),
+                    decode_ring_fill(), (unsigned)surf_present.failed_flips);
+                plog(diag);
+                surf_sync_health_event("playback_stalled", reason);
+            } else if (surf_live && !ps.paused &&
+                       now_lv - surf_health_at >= 15000000ULL &&
+                       surf_present.confirmed != surf_health_frames) {
+                surf_health_at = now_lv;
+                surf_health_frames = surf_present.confirmed;
+                surf_sync_health_event("playing", "presentation_progress");
+            }
             if (ev == LIVE_EV_RESUME_STALE) live_label = TR("Returning to live");
             else if (ev != LIVE_EV_NONE) {
                 plog(ev == LIVE_EV_STALLED ? "live: the picture stopped" : "live: stream ended");
@@ -1873,7 +1903,10 @@ void show_player_run(const JFItem *item, u32 resume_secs,
              !strcmp(surf_item_name, "Surf: All Channels") ? "all" :
              !strcmp(surf_item_name, "Surf: Sports") ? "sports" :
              !strcmp(surf_item_name, "Surf: Movies & Series") ? "movies-series" : "");
-                surf_sync_session(g_prog.surf_mode, g_prog.gen);
+                surf_sync_reconnect(g_prog.surf_mode, g_prog.gen);
+                surf_present_init(&surf_present, timing_get_us());
+                surf_health_at = timing_get_us();
+                surf_health_frames = 0;
                 surf_menu_session_reset();
                 snprintf(g_prog.live_id, sizeof g_prog.live_id, "%s", ps.source.live_stream_id);
                 live_watch_opened(&live_w, timing_get_us());
@@ -1994,8 +2027,11 @@ void show_player_run(const JFItem *item, u32 resume_secs,
             }
         }
 
-        if (g_prog.surf_mode[0] && ps.surf_new_picture)
+        if (g_prog.surf_mode[0] && ps.surf_new_picture) {
+            surf_present_queue(&surf_present, ps.surf_presented_seq);
             surf_sync_flip_queued(ps.surf_presented_seq, 0);
+            ps.surf_new_picture = false;
+        }
         flip();
         flip_queued = true;
     }

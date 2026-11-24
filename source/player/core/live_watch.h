@@ -136,3 +136,51 @@ static inline void live_watch_channel_changed(LiveWatch *w) {
     w->window_us    = 0;
     w->reconnects   = 0;
 }
+
+/* Surf-specific presentation progress. A HUD-only or failed flip is not a
+ * presented picture. Sequence zero is valid, including after decoder wrap.
+ * Only the main display thread owns this state; no atomics or allocations. */
+#define SURF_STARTUP_STALL_US 15000000ULL
+typedef struct {
+    bool queued, have_presented;
+    uint32_t queued_seq, last_seq;
+    int confirmed;
+    uint32_t failed_flips;
+    uint64_t startup_since_us;
+} SurfPresentationWatch;
+
+static inline void surf_present_init(SurfPresentationWatch *p, uint64_t now_us) {
+    p->queued = p->have_presented = false;
+    p->queued_seq = p->last_seq = 0;
+    p->confirmed = 0;
+    p->failed_flips = 0;
+    p->startup_since_us = now_us;
+}
+static inline void surf_present_queue(SurfPresentationWatch *p, uint32_t seq) {
+    p->queued = true;
+    p->queued_seq = seq;
+}
+static inline bool surf_present_complete(SurfPresentationWatch *p, bool success) {
+    if (!p->queued) return false;
+    p->queued = false;
+    if (!success) {
+        if (p->failed_flips != UINT32_MAX) ++p->failed_flips;
+        return false;
+    }
+    if (p->have_presented && p->last_seq == p->queued_seq) return false;
+    p->have_presented = true;
+    p->last_seq = p->queued_seq;
+    if (p->confirmed < 2147483647) ++p->confirmed;
+    return true;
+}
+static inline LiveEvent live_watch_surf_step(LiveWatch *w, SurfPresentationWatch *p,
+                                             uint64_t now_us, bool paused,
+                                             bool ended, uint64_t audio_us) {
+    const LiveEvent event = live_watch_step(w, now_us, paused, p->confirmed, ended, audio_us);
+    if (paused || p->have_presented || now_us < p->startup_since_us)
+        p->startup_since_us = now_us;
+    if (event != LIVE_EV_NONE || paused || p->have_presented) return event;
+    if (now_us - p->startup_since_us >= SURF_STARTUP_STALL_US &&
+        live_watch_may_reconnect(w, now_us)) return LIVE_EV_STALLED;
+    return LIVE_EV_NONE;
+}

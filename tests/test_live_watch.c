@@ -177,7 +177,34 @@ static void pcr(void) {
     CHECK(live_pcr_ms(&p) == 0);
 }
 
+static void surf_presentation(void) {
+    LiveWatch w; SurfPresentationWatch p;
+    live_watch_init(&w, S(100)); surf_present_init(&p, S(100));
+    CHECK(!surf_present_complete(&p, true));
+    surf_present_queue(&p, 0);
+    CHECK(!surf_present_complete(&p, false) && p.confirmed == 0 && p.failed_flips == 1);
+    CHECK(live_watch_surf_step(&w, &p, S(114), false, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_surf_step(&w, &p, S(115), false, false, 0) == LIVE_EV_STALLED);
+    live_watch_opened(&w, S(116)); surf_present_init(&p, S(116));
+    surf_present_queue(&p, 0);
+    CHECK(surf_present_complete(&p, true) && p.confirmed == 1);
+    surf_present_queue(&p, 0);
+    CHECK(!surf_present_complete(&p, true) && p.confirmed == 1);
+    surf_present_queue(&p, 0xffffffffu);
+    CHECK(surf_present_complete(&p, true));
+    surf_present_queue(&p, 0);
+    CHECK(surf_present_complete(&p, true) && p.confirmed == 3);
+    CHECK(live_watch_surf_step(&w, &p, S(117), false, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_surf_step(&w, &p, S(124), false, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_surf_step(&w, &p, S(135), false, false, 0) == LIVE_EV_STALLED);
+    live_watch_opened(&w, S(136)); surf_present_init(&p, S(136));
+    CHECK(live_watch_surf_step(&w, &p, S(200), true, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_surf_step(&w, &p, S(201), false, false, 0) == LIVE_EV_NONE);
+    CHECK(live_watch_surf_step(&w, &p, S(202), false, true, 0) == LIVE_EV_ENDED);
+}
+
 int main(void) {
+    surf_presentation();
     CHECK(live_buffer_seconds(0) == 4 && live_buffer_seconds(1) == 8 && live_buffer_seconds(2) == 15);
     CHECK(live_buffer_seconds(-1) == 8 && live_buffer_seconds(3) == 8);
     CHECK(live_buffer_target(4000000u, 100000, 8) == 21277);

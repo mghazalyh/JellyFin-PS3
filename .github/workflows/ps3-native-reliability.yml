@@ -1,0 +1,14 @@
+name: PS3 native reliability validation
+on:
+  push:
+    branches:
+      - feature/ps3-native-reliability-20261125
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host_tests:
+    uses: ./.github/workflows/ps3-full-regression.yml
+  ps3_build:
+    needs: host_tests
+    uses: ./.github/workflows/ps3-cloud-build.yml

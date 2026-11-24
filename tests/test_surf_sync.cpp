@@ -86,6 +86,24 @@ int main() {
     surf_sync_session("all",2); CHECK(!gated && !surf_sync_enabled());
     surf_sync_flip_completed(true); CHECK(!gated);
     surf_sync_stop();
+    now_us = 12345;
+    surf_sync_session("all", 3);
+    surf_sync_set_enabled(true);
+    char before[24], after[24];
+    surf_sync_trace_prefix(before, sizeof before);
+    surf_sync_reconnect("all", 3);
+    surf_sync_trace_prefix(after, sizeof after);
+    CHECK(!strcmp(before, after) && surf_sync_enabled() && !gated);
+    SurfSyncEvent evt;
+    bool reopened = false;
+    while (surf_sync_take_event(&evt)) {
+        if (!strcmp(evt.state, "stream_reopened")) reopened = true;
+        CHECK(!strncmp(evt.trace, before, strlen(before)));
+    }
+    CHECK(reopened);
+    surf_sync_reconnect("sports", 3);
+    CHECK(!surf_sync_enabled() && !gated);
+    surf_sync_stop();
     printf("Surf state machine: %u checks, %u failures\n",checks,failures);
     return failures ? 1 : 0;
 }
