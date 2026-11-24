@@ -6,9 +6,33 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: native-ps3-reliability-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  native_harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sanitized protocol and history regression
+        run: |
+          set -euo pipefail
+          cd tests
+          g++ -std=c++11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o /tmp/test_remote_protocol test_remote_protocol.cpp
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/test_remote_protocol
+          g++ -std=c++11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o /tmp/test_surf_gate test_surf_gate.cpp
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/test_surf_gate
+      - name: Test Python FTP protocol, offline metrics and bounded soak
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/ps3_unattended.py tests/test_ps3_unattended.py
+          python3 -m unittest discover -s tests -p test_ps3_unattended.py -v
+      - name: Check remote action allowlist contains no shell execution
+        run: |
+          ! grep -Ein 'system\(|popen\(|exec[vle]*\(|subprocess|eval\(' source/player/remote_protocol.h source/player/remote_mailbox.cpp tools/ps3_unattended.py
   host_tests:
     uses: ./.github/workflows/ps3-full-regression.yml
   ps3_build:
-    needs: host_tests
+    needs: [native_harness, host_tests]
     uses: ./.github/workflows/ps3-cloud-build.yml

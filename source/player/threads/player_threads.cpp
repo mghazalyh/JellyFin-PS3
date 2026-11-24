@@ -20,6 +20,8 @@
 #include "timing.h"
 #include "player_internal.h"
 #include "surf_sync.h"
+#include "remote_mailbox.h"
+#include "meminfo.h"
 #include "player_stats.h"
 #include "jellyfin_api.h"
 #include "api_livetv.h"
@@ -616,6 +618,7 @@ void progress_thread_fn(void *arg) {
     int tick = 0;
     char guide_item[64] = "";
     int  guide_wait = 0;
+    u64 remote_poll_at = 0, remote_sample_at = 0;
     u32 wd_iter = g_dec_iter;
     int wd_still = 0;
     while (PROG_LIVE()) {
@@ -640,6 +643,22 @@ void progress_thread_fn(void *arg) {
             snprintf(guide_item, sizeof guide_item, "%s", g_prog.item);
             live_guide_fetch(guide_item, gen);
         }
+        // Wall-clock scheduled, no catch-up burst after a slow HTTP call.
+        // All local I/O stays on this low-priority progress worker.
+        if (PROG_LIVE() && g_prog.surf_mode[0]) {
+            const u64 now = timing_get_us();
+            if (now >= remote_poll_at) {
+                remote_poll_at = now + 1000000ULL;
+                jf_remote_tick(gen, g_prog.surf_mode, true,
+                               meminfo_avail_kb(), (u32)jbuf_count());
+            }
+            if (now >= remote_sample_at) {
+                remote_sample_at = now + 5000000ULL;
+                jf_remote_sample(gen, meminfo_avail_kb(), (u32)jbuf_count(),
+                                 (u32)(audio_get_clock_us() / 1000ULL),
+                                 g_prog.paused ? 1U : 0U);
+            }
+        }
         if (++tick < 40) continue;   // report every ~10 s
         tick = 0;
         if (!g_prog.pos_valid) continue;  // mid-seek flush: position unstable
@@ -663,7 +682,10 @@ void progress_thread_fn(void *arg) {
         }
     }
     #undef PROG_LIVE
-
+    if (g_prog.gen == gen && g_prog.surf_mode[0]) {
+        jf_remote_tick(gen, g_prog.surf_mode, false,
+                       meminfo_avail_kb(), (u32)jbuf_count());
+    }
     sysThreadExit(0);
 }
 

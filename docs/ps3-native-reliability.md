@@ -27,8 +27,13 @@ do not alter Jellyfin's server-side shared MPEG-TS route, codecs or bitrate.
    startup/write failures, and join the log thread on shutdown.
 9. Host regressions for flips, startup stalls, reconnect limits, trace lifetime,
    history selection, escape decoding, rejected identity and status confirmation.
-10. Cloud CI runs host regression and PowerPC64 endian comparison before the
+10. Cloud CI runs host regression, sanitizer and PowerPC64 endian comparison before the
     pinned PS3 SDK package build. No SDK installation on the Mac.
+11. Port the existing opt-in JFR1 FTP mailbox and JFM1 metrics analyzer, without
+    OpenCode tooling. Controls use the same native action worker. Bind commands
+    to both generation and Surf mode; report success only after confirmation.
+12. Serialize overlapping progress-worker file operations, recheck the key on
+    every command, cap metrics rotation, and schedule samples without catch-up bursts.
 
 ## Next phases: not implemented or verified by this commit
 
@@ -40,7 +45,7 @@ do not alter Jellyfin's server-side shared MPEG-TS route, codecs or bitrate.
 | Buffering | Measure PCR reserve and underflows; tune bounded buffering without increasing Wi-Fi bitrate or decoded-frame memory blindly. |
 | Resource ownership | Audit socket/decoder/PCM/thread cleanup and old-generation callbacks; test repeated stop/reopen cycles and memory slope on hardware. |
 | Diagnostics | Add packet arrival, decoded-frame counters, actual presented PTS, consumed PCM and drift; validate log rotation and dropped counts physically. |
-| Unattended test | Review and integrate feature/ps3-unattended-harness-20261123; allowlisted file commands, unique run ID, atomic result export, no arbitrary shell, bounded logs, cancel support. |
+| Unattended hardware test | The bounded JFR1/JFM1 implementation is ported; provision a key explicitly on a trusted LAN, run real-console tests and verify clean stop, mode changes, response files, memory slope and log rotation. |
 | Hardware validation | Test native PS3 Wi-Fi with startup, transitions, Previous/Favorites, long stalls, manual Stop, reconnects, controller responsiveness, A/V drift, and soak. |
 | Server/client parity | Preserve authenticated shared transport; verify native route and exact source marker with production server. |
 

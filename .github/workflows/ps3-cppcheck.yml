@@ -4,6 +4,7 @@ on:
     branches:
       - main
       - feature/ps3-surf-native-20261123
+      - feature/ps3-native-reliability-20261125
   pull_request:
   workflow_dispatch:
 

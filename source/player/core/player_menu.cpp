@@ -22,6 +22,7 @@
 #include "http.h"
 #include "audio.h"
 #include "surf_sync.h"
+#include "remote_mailbox.h"
 #include "surf_history.h"    // strict bounded identity and status parsing
 #include "autoskip.h"        // Skip Intros / Skip Credits
 #include "statsovl.h"        // Playback Statistics
@@ -182,6 +183,7 @@ struct SurfActionJob {
     char source[152];
     char previous_token[40];
     char trace[32];
+    char remote_id[17];
     u32 generation;
     u32 menu_epoch;
     char token[256]; // fixed-size authenticated copy, no per-click malloc
@@ -255,6 +257,8 @@ static void surf_action_worker(void *arg) {
     char new_id[257] = "";
     bool new_selection = false;
     bool selected_valid = false;
+    bool previous_confirmed = false;
+    bool post_confirmed = false;
     int status = 0;
     bool valid = job && job->token[0] && job->base_url[0];
     const bool previous = valid && !strcmp(job->action, "previous");
@@ -386,6 +390,7 @@ static void surf_action_worker(void *arg) {
                     usleep(1500000);
                 }
                 if (confirmed) {
+                    previous_confirmed = true;
                     // The selected source is now Current. Do not reuse its old
                     // history token for a subsequent Favorite.
                     new_selection = true;
@@ -403,7 +408,13 @@ static void surf_action_worker(void *arg) {
             surf_send_client_event(job, "previous_clicked", "", new_source, accepted_status);
         }
     }
-    if (post_action || (valid && favorite_current)) {
+    if ((post_action || (valid && favorite_current)) &&
+        (g_prog.gen != job->generation || !g_prog.playing || !g_prog.pos_valid ||
+         strcmp(g_prog.surf_mode, job->mode))) {
+        valid = false;
+        snprintf(result, sizeof result, "%s", "Surf request cancelled; playback changed");
+    }
+    if (valid && (post_action || favorite_current)) {
         const char *method = favorite_previous ? "favorite" : job->action;
         const int n = snprintf(action_url, sizeof action_url,
                                "%s/%s", job->base_url, method);
@@ -415,6 +426,7 @@ static void surf_action_worker(void *arg) {
             status = http_request(HTTP_POST, action_url, payload,
                                   job->token, reply, sizeof reply);
             if (status >= 200 && status < 300) {
+                post_confirmed = true;
                 const char *message =
                     !strcmp(job->action, "pause")
                     ? "Looping paused; playback continues"
@@ -454,6 +466,18 @@ static void surf_action_worker(void *arg) {
     s_surf_result_selection = new_selection;
     __sync_synchronize();
     __sync_lock_test_and_set(&s_surf_feedback_ready, 1);
+    if (job && job->remote_id[0]) {
+        const bool same = g_prog.gen == job->generation && g_prog.playing &&
+                          !strcmp(g_prog.surf_mode, job->mode);
+        const bool ok = valid && same && (select_current ||
+                        (history_only && selected_valid) ||
+                        (previous && previous_confirmed) ||
+                        (!strcmp(job->action, "status") && status == 200) ||
+                        post_confirmed);
+        jf_remote_finish(job->remote_id, ok,
+                         same ? result : "session changed; server result uncertain",
+                         job->generation);
+    }
     __sync_lock_release(&s_surf_busy);
     sysThreadExit(0);
 }
@@ -481,18 +505,19 @@ static void surf_feedback_poll(PlayerState *ps) {
                    timing_get_us() + 3500000ULL);
 }
 
-static void surf_action(PlayerState *ps, const char *action) {
+static bool surf_action(PlayerState *ps, const char *action, const char *remote_id = NULL) {
     const char *mode = surf_mode_for(ps);
-    if (!mode || !action) return;
+    if (!mode || !action) return false;
     if (!__sync_bool_compare_and_swap(&s_surf_busy, 0, 1)) {
         hud_set_banner("Surf Live TV", "Surf request is in progress",
                        timing_get_us() + 2000000ULL);
-        return;
+        return false;
     }
     SurfActionJob *job = &s_surf_job;
     memset(job, 0, sizeof *job);
     snprintf(job->mode, sizeof job->mode, "%s", mode);
     snprintf(job->action, sizeof job->action, "%s", action);
+    if (remote_id) snprintf(job->remote_id, sizeof job->remote_id, "%s", remote_id);
     job->generation = g_prog.gen;
     job->menu_epoch = s_surf_menu_epoch;
     char prefix[24];
@@ -511,14 +536,14 @@ static void surf_action(PlayerState *ps, const char *action) {
         __sync_lock_release(&s_surf_busy);
         hud_set_banner("Surf Live TV", "Surf server address unavailable",
                        timing_get_us() + 3000000ULL);
-        return;
+        return false;
     }
     snprintf(job->token, sizeof job->token, "%s", g_token);
     if (!job->token[0]) {
         __sync_lock_release(&s_surf_busy);
         hud_set_banner("Surf Live TV", "Jellyfin authentication unavailable",
                        timing_get_us() + 2000000ULL);
-        return;
+        return false;
     }
     sys_ppu_thread_t tid;
     static char name[] = "jf_surf_ctl";
@@ -529,10 +554,24 @@ static void surf_action(PlayerState *ps, const char *action) {
         __sync_lock_release(&s_surf_busy);
         hud_set_banner("Surf Live TV", "Cannot start Surf network worker",
                        timing_get_us() + 3000000ULL);
-        return;
+        return false;
     }
     hud_set_banner("Surf Live TV", "Sending Surf request...",
                    timing_get_us() + 1800000ULL);
+    return true;
+}
+
+// Both controller and mailbox actions use the same authenticated worker.
+bool player_remote_surf_action(PlayerState *ps, const char *action, const char *id) {
+    if (!ps || !action || !id || !jf_remote_hex(id, 16)) return false;
+    if (!strcmp(action, "pause_surf")) return surf_action(ps, "pause", id);
+    if (!strcmp(action, "resume_surf")) return surf_action(ps, "resume", id);
+    if (!strcmp(action, "favorite_current")) return surf_action(ps, "favorite", id);
+    if (!strcmp(action, "play_previous")) return surf_action(ps, "previous", id);
+    if (!strcmp(action, "select_previous")) return surf_action(ps, "select_previous", id);
+    if (!strcmp(action, "favorite_previous")) return surf_action(ps, "favorite_previous", id);
+    if (!strcmp(action, "select_current")) return surf_action(ps, "current", id);
+    return false;
 }
 
 enum { OPT_CHAPTERS, OPT_TRACKS, OPT_PICTURE, OPT_STATS, OPT_NEXT, OPT_PREV,
