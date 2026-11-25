@@ -656,14 +656,15 @@ void progress_thread_fn(void *arg) {
                 remote_sample_at = now + 5000000ULL;
                 const u32 free_kb = meminfo_avail_kb(), depth = (u32)jbuf_count();
                 const u64 audio_us = audio_get_clock_us();
-                const bool paused = g_prog.paused;
-                jf_remote_sample(gen, free_kb, depth, (u32)(audio_us / 1000ULL),
-                                 paused ? 1U : 0U);
+                const u64 audio_sample_at = timing_get_us();
+                const bool audio_valid = audio_clock_valid(), paused = g_prog.paused;
                 if (now >= extended_sample_at && g_prog.pos_valid && PROG_LIVE()) {
                     extended_sample_at = now + 10000000ULL;
                     jf_remote_sample_extended(gen, free_kb, depth, audio_us,
-                                              audio_clock_valid(), paused);
+                                              audio_sample_at, audio_valid, paused);
                 }
+                jf_remote_sample(gen, free_kb, depth, (u32)(audio_us / 1000ULL),
+                                 paused ? 1U : 0U);
             }
         }
         if (++tick < 40) continue;   // report every ~10 s

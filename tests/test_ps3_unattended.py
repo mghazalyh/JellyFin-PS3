@@ -171,6 +171,34 @@ class HarnessTests(unittest.TestCase):
                 log.write_bytes(b"x" * (h.MAX_ARCHIVE_BYTES + 1))
                 h.analyze_metrics([log])
 
+    def test_jfm2_clock_epochs_and_invalid_records(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log = pathlib.Path(folder) / "jf_metrics2.bin"
+            def row(mono, audio, epoch=1, connection=0, flags=161, starves=0):
+                def split(v):
+                    return v >> 32, v & 0xffffffff
+                return h.METRIC2_WIRE.pack(h.METRIC2_MAGIC, 7, flags,
+                    connection, epoch, 10, 10440, 8, 100+starves, starves,
+                    *split(mono), *split(audio), *split(500), *split(mono-100),
+                    0, 0)
+            base = 0x100000000
+            log.write_bytes(row(base, 10_000_000) +
+                row(base+10_000_000, 15_000_000, starves=2) +
+                row(base+20_000_000, 0, starves=3) +
+                row(base+30_000_000, 2_000_000, epoch=2, starves=4) +
+                row(base+40_000_000, 100, epoch=2, connection=1) +
+                b"x"*80+b"bad")
+            report = h.analyze_metrics2([log])
+            self.assertEqual(report["total_samples"], 5)
+            self.assertEqual(report["malformed_records"], 1)
+            self.assertEqual(report["truncated_trailing_bytes"], 3)
+            first = report["sessions"][f"{log}:7:0"]
+            self.assertEqual(first["backward_audio_steps"], 1)
+            self.assertEqual(first["abnormal_clock_intervals"], 1)
+            self.assertEqual(first["observed_epoch_changes"], 1)
+            self.assertEqual(first["starvation_blocks_delta"], 4)
+            self.assertEqual(first["max_picture_age_us"], 100)
+
     def test_unattended_soak_is_bounded_and_archived(self):
         fake = FakeFTP()
         with tempfile.TemporaryDirectory() as folder:

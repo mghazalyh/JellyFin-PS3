@@ -240,6 +240,8 @@ class PS3Mailbox:
             "remote_response.txt": RESPONSE_PATH,
             "remote_metrics.bin": "/dev_hdd0/tmp/jf_metrics.bin",
             "remote_metrics.prev.bin": "/dev_hdd0/tmp/jf_metrics.prev.bin",
+            "remote_metrics2.bin": "/dev_hdd0/tmp/jf_metrics2.bin",
+            "remote_metrics2.prev.bin": "/dev_hdd0/tmp/jf_metrics2.prev.bin",
         }
         for local_name, remote_name in names.items():
             output = destination / local_name
@@ -364,6 +366,73 @@ def analyze_metrics(paths: list[Path]) -> dict[str, object]:
 
 
 
+METRIC2_WIRE = struct.Struct(">20I")
+METRIC2_MAGIC = 0x4A464D32
+
+
+def analyze_metrics2(paths: list[Path]) -> dict[str, object]:
+    """Bounded JFM2 analysis; clock jumps are not measured lip-sync drift."""
+    reports = {}
+    malformed = trailing = samples = 0
+    for path in paths:
+        if path.stat().st_size > MAX_ARCHIVE_BYTES:
+            raise MailboxError("metrics archive exceeds bounded maximum: " + str(path))
+        # Never merge separate archive lifetimes: generation numbers may recur.
+        previous = None
+        with path.open("rb") as stream:
+            while True:
+                raw = stream.read(METRIC2_WIRE.size)
+                if not raw:
+                    break
+                if len(raw) != METRIC2_WIRE.size:
+                    trailing += len(raw)
+                    break
+                v = METRIC2_WIRE.unpack(raw)
+                if v[0] != METRIC2_MAGIC or v[18] or v[19] or v[2] & ~255:
+                    malformed += 1
+                    previous = None
+                    continue
+                generation, flags, connection, epoch, seq, free, queue, blocks, starves = v[1:10]
+                mono, audio, video, flip = (
+                    (v[i] << 32) | v[i+1] for i in (10, 12, 14, 16))
+                key = f"{path}:{generation}:{connection}"
+                row = reports.setdefault(key, dict(samples=0, valid_picture_samples=0,
+                    valid_audio_samples=0, gate_samples=0, recovery_samples=0,
+                    zero_queue_samples=0, backward_audio_steps=0,
+                    abnormal_clock_intervals=0, observed_epoch_changes=0,
+                    starvation_blocks_delta=0, max_picture_age_us=0,
+                    min_free_kb=free, max_free_kb=free))
+                samples += 1
+                row["samples"] += 1
+                row["valid_picture_samples"] += bool(flags & 1)
+                row["valid_audio_samples"] += bool(flags & 32)
+                row["gate_samples"] += bool(flags & 4)
+                row["recovery_samples"] += bool(flags & 8)
+                row["zero_queue_samples"] += queue == 0
+                row["min_free_kb"] = min(row["min_free_kb"], free)
+                row["max_free_kb"] = max(row["max_free_kb"], free)
+                if flags & 1 and 0 < flip <= mono:
+                    row["max_picture_age_us"] = max(row["max_picture_age_us"], mono-flip)
+                if previous is not None and previous[0] == key:
+                    _, pf, pe, pm, pa, pb, ps = previous
+                    elapsed = mono-pm
+                    if 0 < elapsed <= 600_000_000:
+                        row["observed_epoch_changes"] += epoch != pe
+                        if flags & pf & 128 and blocks >= pb and starves >= ps:
+                            row["starvation_blocks_delta"] += starves-ps
+                        if (flags & pf & 32 and not ((flags | pf) & (64|4|16))
+                                and epoch == pe):
+                            delta = audio-pa
+                            if delta < 0:
+                                row["backward_audio_steps"] += 1
+                            elif abs(delta-elapsed) > 500_000:
+                                row["abnormal_clock_intervals"] += 1
+                previous = (key, flags, epoch, mono, audio, blocks, starves)
+    return dict(total_samples=samples, malformed_records=malformed,
+                truncated_trailing_bytes=trailing, sessions=reports,
+                caveat="Audio and confirmed video timestamps are not simultaneous; observed publisher epoch is not media identity.")
+
+
 def run_soak(mailbox: PS3Mailbox, secret: str, destination: Path,
              duration_s: int, interval_s: int, exercise_controls: bool = False,
              clock: Callable[[], float] = time.monotonic,
@@ -449,6 +518,12 @@ def run_soak(mailbox: PS3Mailbox, secret: str, destination: Path,
             ) if p.exists()]
             if present:
                 report["metrics"] = analyze_metrics(present)
+            extended = [p for p in (
+                destination / "remote_metrics2.bin",
+                destination / "remote_metrics2.prev.bin"
+            ) if p.exists()]
+            if extended:
+                report["metrics2"] = analyze_metrics2(extended)
         except (MailboxError,) + ftplib.all_errors as exc:
             report["errors"].append("diagnostic collection: " + str(exc))
         report["ended_utc"] = datetime.now(timezone.utc).isoformat()
@@ -478,6 +553,8 @@ def cli(argv: Optional[list[str]] = None) -> int:
     analyze.add_argument("paths", type=Path, nargs="+")
     metrics = sub.add_parser("metrics", help="Decode JFM1 PS3 binary metric archives offline")
     metrics.add_argument("paths", type=Path, nargs="+")
+    metrics2 = sub.add_parser("metrics2", help="Decode JFM2 presentation/audio diagnostics offline")
+    metrics2.add_argument("paths", type=Path, nargs="+")
     soak = sub.add_parser("soak", help="Run a finite unattended Surf diagnostic test")
     soak.add_argument("--secret-file", type=Path, required=True)
     soak.add_argument("--output", type=Path, required=True)
@@ -491,6 +568,9 @@ def cli(argv: Optional[list[str]] = None) -> int:
             return 0
         if args.command == "metrics":
             print(json.dumps(analyze_metrics(args.paths), indent=2))
+            return 0
+        if args.command == "metrics2":
+            print(json.dumps(analyze_metrics2(args.paths), indent=2))
             return 0
         with PS3Mailbox(args.host, port=args.port, timeout=args.timeout) as mailbox:
             if args.command == "probe":

@@ -285,10 +285,10 @@ void jf_remote_sample(u32 generation, u32 free_kb, u32 queue_depth,
 #define JF_METRICS2_PATH "/dev_hdd0/tmp/jf_metrics2.bin"
 #define JF_METRICS2_PREV "/dev_hdd0/tmp/jf_metrics2.prev.bin"
 void jf_remote_sample_extended(u32 generation, u32 free_kb, u32 queue_depth,
-                               u64 audio_clock_us, bool audio_valid, bool paused) {
+                               u64 audio_clock_us, u64 audio_sample_at, bool audio_valid, bool paused) {
     SurfSyncSnapshot snap = {};
     if (!surf_sync_try_snapshot(generation, &snap)) return;
-    const u64 now = timing_get_us();
+    const u64 now = audio_sample_at;
     u32 blocks = 0, starves = 0;
     const bool have_counts = player_stats_audio_counts(&blocks, &starves);
     RemoteIoGuard io;
