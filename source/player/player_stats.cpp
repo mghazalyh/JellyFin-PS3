@@ -297,6 +297,13 @@ void player_stats_on_frame_shown(void) {
 }
 
 // Audio thread — one call per DMA block written.
+bool player_stats_audio_counts(u32 *blocks, u32 *starves) {
+    if (!blocks || !starves) return false;
+    *blocks = s_audio_blocks;
+    *starves = s_audio_starves;
+    return true;
+}
+
 void player_stats_on_audio_write(int pcm_avail_pairs, int dma_ahead,
                                  int dma_total, bool starved) {
     s_audio_blocks++;

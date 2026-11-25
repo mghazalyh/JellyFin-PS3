@@ -618,7 +618,7 @@ void progress_thread_fn(void *arg) {
     int tick = 0;
     char guide_item[64] = "";
     int  guide_wait = 0;
-    u64 remote_poll_at = 0, remote_sample_at = 0;
+    u64 remote_poll_at = 0, remote_sample_at = 0, extended_sample_at = 0;
     u32 wd_iter = g_dec_iter;
     int wd_still = 0;
     while (PROG_LIVE()) {
@@ -654,9 +654,16 @@ void progress_thread_fn(void *arg) {
             }
             if (now >= remote_sample_at) {
                 remote_sample_at = now + 5000000ULL;
-                jf_remote_sample(gen, meminfo_avail_kb(), (u32)jbuf_count(),
-                                 (u32)(audio_get_clock_us() / 1000ULL),
-                                 g_prog.paused ? 1U : 0U);
+                const u32 free_kb = meminfo_avail_kb(), depth = (u32)jbuf_count();
+                const u64 audio_us = audio_get_clock_us();
+                const bool paused = g_prog.paused;
+                jf_remote_sample(gen, free_kb, depth, (u32)(audio_us / 1000ULL),
+                                 paused ? 1U : 0U);
+                if (now >= extended_sample_at && g_prog.pos_valid && PROG_LIVE()) {
+                    extended_sample_at = now + 10000000ULL;
+                    jf_remote_sample_extended(gen, free_kb, depth, audio_us,
+                                              audio_clock_valid(), paused);
+                }
             }
         }
         if (++tick < 40) continue;   // report every ~10 s
@@ -721,12 +728,13 @@ void upload_thread_fn(void *arg) {
         // the two cannot disagree.  The display needs it to distinguish a
         // new picture from a re-upload of the one already on screen.
         const u32 seq_a  = jbuf_peek_seq();
+        const u64 pts_a = slot_a ? jbuf_peek_pts_us() : 0;
         if (slot_a && g_prog.surf_mode[0] && surf_sync_enabled()) {
             // jbuf front may advance and be recycled after unlocking. Sample
             // its 64 luminance points while the producer/consumer mutex still
             // protects the contents, never from an unlocked stale pointer.
             surf_sync_probe_video(slot_a, jbuf_fw(), jbuf_fh(),
-                                  seq_a, jbuf_peek_pts_us());
+                                  seq_a, pts_a);
         }
         sysMutexUnlock(s_jbuf_mtx);
 
@@ -738,6 +746,7 @@ void upload_thread_fn(void *arg) {
         if (slot_b) { upload_yuv_planes(slot_b, s_yuvB_buf[back]); s_vid_b_present = true; }
         else        { s_vid_b_present = false; }
         s_vid_uploaded_seq = seq_a;
+        s_vid_uploaded_pts_us = pts_a;
         __asm__ volatile("sync" ::: "memory");
         s_vid_frame_ready = true;
     }

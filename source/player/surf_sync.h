@@ -23,6 +23,16 @@ bool surf_sync_recovery_pending(void);
 void surf_sync_flip_queued(u32 sequence, u64 pts_us);
 void surf_sync_flip_completed(bool success);
 
+// Diagnostic-only snapshot; try-lock, never block the progress worker.
+struct SurfSyncSnapshot {
+    u32 generation, connection, observed_epoch, presented_seq, flags;
+    u64 presented_pts_us, presented_at_us;
+};
+// flags: 1=confirmed picture, 2=gate enabled, 4=PCM gated,
+// 8=recovery pending, 16=transition pending. Epoch is publisher-observed,
+// NOT an authoritative identity of the displayed media.
+bool surf_sync_try_snapshot(u32 generation, SurfSyncSnapshot *out);
+
 struct SurfSyncEvent {
     char event[28];
     char mode[24];

@@ -41,6 +41,7 @@ volatile bool s_vid_frame_ready = false;
 // display uses it to tell a NEW picture from a re-upload of the same one --
 // see the pulldown counters in player_display.cpp.
 volatile u32  s_vid_uploaded_seq = 0;
+volatile u64  s_vid_uploaded_pts_us = 0;
 volatile bool s_vid_b_present   = false;
 
 // Frame size the letterbox quad was last built for.  vid_gpu_init builds it

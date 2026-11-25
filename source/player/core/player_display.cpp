@@ -318,6 +318,7 @@ one_to_one_done: ;
         // overwrite s_vid_uploaded_seq as soon as frame_ready becomes false.
         if (ps->live && g_prog.surf_mode[0]) {
             ps->surf_presented_seq = s_vid_uploaded_seq;
+            ps->surf_presented_pts_us = s_vid_uploaded_pts_us;
             ps->surf_new_picture = true;
         }
         s_vid_frame_ready = false;
@@ -379,6 +380,7 @@ one_to_one_done: ;
         // overwrite s_vid_uploaded_seq as soon as frame_ready becomes false.
         if (ps->live && g_prog.surf_mode[0]) {
             ps->surf_presented_seq = s_vid_uploaded_seq;
+            ps->surf_presented_pts_us = s_vid_uploaded_pts_us;
             ps->surf_new_picture = true;
         }
         s_vid_frame_ready = false;
@@ -389,6 +391,7 @@ one_to_one_done: ;
         __asm__ volatile("sync" ::: "memory");
         if (ps->live && g_prog.surf_mode[0]) {
             ps->surf_presented_seq = s_vid_uploaded_seq;
+            ps->surf_presented_pts_us = s_vid_uploaded_pts_us;
             ps->surf_new_picture = true;
         }
         s_vid_frame_ready = false;

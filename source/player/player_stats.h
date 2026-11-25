@@ -128,6 +128,8 @@ void player_stats_on_audio_levels(const int *peaks, int count);
 
 // Snapshot the current metrics.  Safe to call from the display thread.
 void player_stats_get(PlayerStats *out);
+// Cheap integer-only snapshot; no extra audio hot-path work.
+bool player_stats_audio_counts(u32 *blocks, u32 *starves);
 
 // Draw the overlay for this frame.  Returns immediately when the runtime
 // toggle is off — no compose, no text layout, no draw call.  Otherwise the
@@ -148,6 +150,7 @@ static inline void player_stats_on_frame_shown(void) {}
 static inline void player_stats_on_audio_write(int, int, int, bool) {}
 static inline void player_stats_on_audio_levels(const int *, int) {}
 static inline void player_stats_get(PlayerStats *) {}
+static inline bool player_stats_audio_counts(u32 *, u32 *) { return false; }
 static inline void player_stats_render_overlay(void) {}
 static inline void player_stats_bind(const PlayerState *) {}
 

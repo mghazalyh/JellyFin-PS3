@@ -3,6 +3,8 @@
 #include "remote_mailbox.h"
 #include "timing.h"
 #include "plog.h"
+#include "surf_sync.h"
+#include "player_stats.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -276,4 +278,47 @@ void jf_remote_sample(u32 generation, u32 free_kb, u32 queue_depth,
         snprintf(line, sizeof line, "jf_metrics: %u sample write failures", (unsigned)drops);
         plog(line);
     }
+}
+
+// Separate format preserves all JFM1 readers and keeps the legacy collector
+// working. Only the existing progress worker calls this; no audio-thread I/O.
+#define JF_METRICS2_PATH "/dev_hdd0/tmp/jf_metrics2.bin"
+#define JF_METRICS2_PREV "/dev_hdd0/tmp/jf_metrics2.prev.bin"
+void jf_remote_sample_extended(u32 generation, u32 free_kb, u32 queue_depth,
+                               u64 audio_clock_us, bool audio_valid, bool paused) {
+    SurfSyncSnapshot snap = {};
+    if (!surf_sync_try_snapshot(generation, &snap)) return;
+    const u64 now = timing_get_us();
+    u32 blocks = 0, starves = 0;
+    const bool have_counts = player_stats_audio_counts(&blocks, &starves);
+    RemoteIoGuard io;
+    if (!io.acquired) return;
+    static bool initialized = false;
+    struct stat st;
+    if (stat(JF_METRICS2_PATH, &st) == 0 &&
+        ((!initialized && st.st_size > 0) ||
+         st.st_size > JF_METRICS_MAX - 80 || st.st_size % 80 != 0)) {
+        remove(JF_METRICS2_PREV);
+        if (rename(JF_METRICS2_PATH, JF_METRICS2_PREV) != 0) return;
+    }
+    initialized = true;
+    // 20 big-endian words, 80 bytes; preserve 64-bit PTS and monotonic time.
+    // Audio timestamp is sampled by the progress worker, not at the flip.
+    const uint32_t record[20] = {
+        0x4a464d32U, generation,
+        snap.flags | (audio_valid ? 32u : 0u) | (paused ? 64u : 0u) |
+        (have_counts ? 128u : 0u),
+        snap.connection, snap.observed_epoch, snap.presented_seq,
+        free_kb, queue_depth, blocks, starves,
+        (u32)(now >> 32), (u32)now,
+        (u32)(audio_clock_us >> 32), (u32)audio_clock_us,
+        (u32)(snap.presented_pts_us >> 32), (u32)snap.presented_pts_us,
+        (u32)(snap.presented_at_us >> 32), (u32)snap.presented_at_us,
+        0u, 0u
+    };
+    FILE *f = fopen(JF_METRICS2_PATH, "ab");
+    if (!f) { __sync_add_and_fetch(&s_metric_drops, 1); return; }
+    if (fwrite(record, sizeof record, 1, f) != 1)
+        __sync_add_and_fetch(&s_metric_drops, 1);
+    if (fclose(f) != 0) __sync_add_and_fetch(&s_metric_drops, 1);
 }

@@ -213,7 +213,28 @@ static void test_late_callback_after_timeout() {
     CHECK(!gated && !surf_sync_recovery_pending());
     CHECK(take_state("video_flip_audio_release"));
 }
+static void test_presented_snapshot() {
+    begin();
+    SurfSyncSnapshot snap = {};
+    CHECK(surf_sync_try_snapshot(1, &snap) && !(snap.flags & 1));
+    surf_sync_flip_queued(7, 123456789012ULL);
+    surf_sync_flip_completed(false);
+    CHECK(surf_sync_try_snapshot(1, &snap) && !(snap.flags & 1));
+    surf_sync_flip_completed(true); // no queued picture: HUD only
+    CHECK(surf_sync_try_snapshot(1, &snap) && !(snap.flags & 1));
+    surf_sync_flip_queued(8, 123456789012ULL);
+    now_us = 42000;
+    surf_sync_flip_completed(true);
+    CHECK(surf_sync_try_snapshot(1, &snap) && (snap.flags & 1));
+    CHECK(snap.presented_seq == 8 && snap.presented_pts_us == 123456789012ULL && snap.presented_at_us == 42000);
+    CHECK(!surf_sync_try_snapshot(99, &snap));
+    surf_sync_reconnect("all", 1);
+    CHECK(surf_sync_try_snapshot(1, &snap) && !(snap.flags & 1) && snap.connection == 1);
+    surf_sync_stop();
+    CHECK(!surf_sync_try_snapshot(1, &snap));
+}
 int main() {
+    test_presented_snapshot();
     begin();
     picture(90,10); picture(200,11);
     surf_sync_flip_queued(11,440000);

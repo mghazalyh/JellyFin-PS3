@@ -183,6 +183,7 @@ struct PlayerState {
     // on the flip it is actually about to queue.
     bool     surf_new_picture;
     u32      surf_presented_seq;
+    u64      surf_presented_pts_us; // anchor texture PTS, before upload acknowledgement
 
     // Absolute media time (us) corresponding to the current stream's PTS 0.
     // Jellyfin restarts the transcode PTS at 0 on the initial open and on every
@@ -346,6 +347,7 @@ extern volatile u8  * s_yuvB_buf[2][3];  extern u32 s_yuvB_off[2][3];
 extern volatile int   s_vid_disp_idx;
 extern volatile bool  s_vid_frame_ready;
 extern volatile u32   s_vid_uploaded_seq;
+extern volatile u64   s_vid_uploaded_pts_us;
 extern volatile bool  s_vid_b_present;
 
 bool vid_gpu_init(u32 fw, u32 fh);   // false: VRAM allocation failed (already released)

@@ -2057,7 +2057,7 @@ void show_player_run(const JFItem *item, u32 resume_secs,
 
         if (g_prog.surf_mode[0] && ps.surf_new_picture) {
             surf_present_queue(&surf_present, ps.surf_presented_seq);
-            surf_sync_flip_queued(ps.surf_presented_seq, 0);
+            surf_sync_flip_queued(ps.surf_presented_seq, ps.surf_presented_pts_us);
             ps.surf_new_picture = false;
         }
         flip();

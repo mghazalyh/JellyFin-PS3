@@ -42,6 +42,9 @@ static u8 s_luma[64] = {0};
 static u32 s_last_luma_seq = 0, s_candidate_seq = 0;
 static u32 s_flip_seq = 0;
 static bool s_flip_qualified = false;
+static bool s_flip_pending = false, s_have_presented = false;
+static u32 s_presented_seq = 0;
+static u64 s_flip_pts = 0, s_presented_pts = 0, s_presented_at = 0;
 static u64 s_candidate_pts = 0;
 static u64 s_gate_at = 0;
 static bool s_paused = false;
@@ -116,6 +119,9 @@ static void sync_session(const char *mode, u32 generation, bool reconnect) {
     s_recovery_due = false;
     s_have_luma = s_cut_found = false;
     s_last_luma_seq = s_candidate_seq = s_flip_seq = 0;
+    s_flip_pending = s_have_presented = false;
+    s_presented_seq = 0;
+    s_flip_pts = s_presented_pts = s_presented_at = 0;
     s_flip_qualified = false;
     s_candidate_pts = s_gate_at = 0;
     s_paused = false; s_pause_at = 0;
@@ -163,6 +169,7 @@ void surf_sync_stop(void) {
     lock_state();
     s_active = false; s_transition_pending = false;
     s_gating = false; s_have_source = false;
+    s_flip_pending = s_have_presented = false;
     s_recovery_due = false;
     s_flip_qualified = false;
     s_paused = false; s_pause_at = 0;
@@ -319,11 +326,12 @@ void surf_sync_probe_video(const u8 *y, u32 width, u32 height, u32 sequence,
 void surf_sync_flip_queued(u32 sequence, u64 pts_us) {
     lock_state();
     s_flip_seq = sequence;
+    s_flip_pts = pts_us;
+    s_flip_pending = s_active;
     // Qualify the submitted picture now, not retroactively on completion.
     s_flip_qualified = s_active && s_enabled && s_gating &&
                        !s_transition_pending && s_cut_found &&
                        surf_seq_reached(sequence, s_candidate_seq);
-    (void)pts_us;
     unlock_state();
 }
 
@@ -332,6 +340,13 @@ void surf_sync_flip_completed(bool success) {
     u32 epoch = 0, seq = 0, avg = 0, changed = 0;
     u64 pts = 0, duration = 0;
     lock_state();
+    if (s_flip_pending && success && s_active) {
+        s_have_presented = true;
+        s_presented_seq = s_flip_seq;
+        s_presented_pts = s_flip_pts;
+        s_presented_at = timing_get_us();
+    }
+    s_flip_pending = false;
     const bool qualified = s_flip_qualified;
     s_flip_qualified = false;  // Consume once, even if the flip failed.
     if (success && qualified && s_active && s_enabled && s_gating &&
@@ -357,4 +372,20 @@ void surf_sync_flip_completed(bool success) {
                  (unsigned long long)(duration / 1000ULL),avg,changed);
         plog(b);
     }
+}
+
+bool surf_sync_try_snapshot(u32 generation, SurfSyncSnapshot *out) {
+    if (!out || !__sync_bool_compare_and_swap(&s_lock, 0, 1)) return false;
+    if (!s_active || s_generation != generation) { unlock_state(); return false; }
+    out->generation = s_generation;
+    out->connection = s_connection;
+    out->observed_epoch = s_epoch;
+    out->presented_seq = s_presented_seq;
+    out->flags = (s_have_presented ? 1u : 0u) | (s_enabled ? 2u : 0u) |
+                 (s_gating ? 4u : 0u) | (s_recovery_due ? 8u : 0u) |
+                 (s_transition_pending ? 16u : 0u);
+    out->presented_pts_us = s_presented_pts;
+    out->presented_at_us = s_presented_at;
+    unlock_state();
+    return true;
 }
