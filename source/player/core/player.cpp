@@ -1852,11 +1852,17 @@ void show_player_run(const JFItem *item, u32 resume_secs,
             const u64 now_lv = timing_get_us();
             const bool surf_live = g_prog.surf_mode[0] != '\0';
             const u64 audio_us = audio_clock_valid() ? audio_get_clock_us() : 0;
-            const LiveEvent ev = surf_live
+            LiveEvent ev = surf_live
                 ? live_watch_surf_step(&live_w, &surf_present, now_lv, ps.paused,
                                        ps.stream_ended, audio_us)
                 : live_watch_step(&live_w, now_lv, ps.paused, ps.frame_count,
                                   ps.stream_ended, audio_us);
+            if (surf_live && !ps.paused && ev == LIVE_EV_NONE &&
+                surf_sync_recovery_pending() && live_watch_may_reconnect(&live_w, now_lv)) {
+                ev = LIVE_EV_STALLED;
+                surf_sync_health_event("playback_stalled", "audio_gate_reconnect");
+                plog("surf_sync: bounded reconnect requested; PCM stays gated");
+            }
             if (surf_live && ev != LIVE_EV_NONE) {
                 const char *reason = ev == LIVE_EV_ENDED ? "stream_ended" :
                     ev == LIVE_EV_RESUME_STALE ? "resume_stale" :

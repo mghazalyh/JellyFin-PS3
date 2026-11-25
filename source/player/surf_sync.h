@@ -18,6 +18,8 @@ void surf_sync_observe_source(const char *mode, const char *source,
 void surf_sync_probe_video(const u8 *y, u32 width, u32 height, u32 sequence,
                             u64 pts_us);
 void surf_sync_display_tick(bool paused);
+// Non-consuming request; player applies its existing rate-limited recovery.
+bool surf_sync_recovery_pending(void);
 void surf_sync_flip_queued(u32 sequence, u64 pts_us);
 void surf_sync_flip_completed(bool success);
 

@@ -22,9 +22,9 @@ static void picture(u8 luma, u32 seq) {
 static void begin() {
     now_us=1000; passthrough=false;
     surf_sync_session("all",1);
-    CHECK(!gated && !surf_sync_enabled());
+    CHECK(!gated && surf_sync_enabled());
     surf_sync_set_enabled(true);
-    source("A"); source("B"); surf_sync_display_tick(false);
+    source("A"); source("B"); CHECK(gated); surf_sync_display_tick(false);
     CHECK(gated);
 }
 // Drain the bounded event queue and report whether one state was emitted.
@@ -69,8 +69,8 @@ static void test_source_change_before_cut() {
     CHECK(!gated);
     CHECK(take_state("video_flip_audio_release"));
 }
-// Identical or near-identical pictures produce no cut: the bounded timeout is
-// the only release, and it must be observable as such.
+// Identical or near-identical pictures produce no cut: timeout requests
+// recovery without releasing PCM.
 static void test_no_cut_timeout_and_recovery() {
     begin();
     picture(90, 40);
@@ -82,10 +82,10 @@ static void test_no_cut_timeout_and_recovery() {
     CHECK(!take_state("gate_timeout_recovery"));
     now_us = 1000 + 3000000;
     surf_sync_display_tick(false);
-    CHECK(!gated);
+    CHECK(gated && surf_sync_recovery_pending());
     CHECK(take_state("gate_timeout_recovery"));
     CHECK(!take_state("video_flip_audio_release"));
-    // A new source after the timeout gets a fresh gate and can release on a
+    // A new source while recovery is pending stays muted until a
     // confirmed flip.
     source("E");
     surf_sync_display_tick(false);
@@ -143,7 +143,7 @@ static void test_rapid_switches_bound_timeout() {
     CHECK(!take_state("gate_timeout_recovery"));
     now_us = 1000 + 3000000;
     surf_sync_display_tick(false);
-    CHECK(!gated);
+    CHECK(gated && surf_sync_recovery_pending());
     CHECK(take_state("gate_timeout_recovery"));
 }
 // Time spent paused is not time spent waiting for a picture.  Resuming must
@@ -165,7 +165,7 @@ static void test_pause_resume_excludes_paused_time() {
     CHECK(gated);
     now_us = 1000 + 6000001;
     surf_sync_display_tick(false);
-    CHECK(!gated);
+    CHECK(gated && surf_sync_recovery_pending());
     CHECK(take_state("gate_timeout_recovery"));
 }
 // Disabling, re-enabling, stopping and stale generation observations must not
@@ -199,19 +199,19 @@ static void test_enable_disable_stop_and_generation() {
     CHECK(gated);
     surf_sync_stop();
 }
-// A timeout invalidates the pending candidate; a completion from that
-// superseded window cannot release anything later.
+// Timeout requests recovery without releasing PCM; a still-valid matching
+// flip can clear the pending recovery request.
 static void test_late_callback_after_timeout() {
     begin();
     picture(90, 80); picture(200, 81);
     surf_sync_flip_queued(81, 1620000);
     now_us = 1000 + 3000000;
     surf_sync_display_tick(false);
-    CHECK(!gated);
+    CHECK(gated && surf_sync_recovery_pending());
     CHECK(take_state("gate_timeout_recovery"));
     surf_sync_flip_completed(true);
-    CHECK(!gated);
-    CHECK(!take_state("video_flip_audio_release"));
+    CHECK(!gated && !surf_sync_recovery_pending());
+    CHECK(take_state("video_flip_audio_release"));
 }
 int main() {
     begin();
@@ -239,7 +239,7 @@ int main() {
     now_us=2500000; source("C"); surf_sync_display_tick(false);
     CHECK(gated);
     now_us=3001000; surf_sync_display_tick(false);
-    CHECK(!gated);
+    CHECK(gated && surf_sync_recovery_pending());
 
     begin();
     passthrough=true; source("C"); surf_sync_display_tick(false);
@@ -269,7 +269,7 @@ int main() {
 
     begin();
     surf_sync_set_enabled(false); CHECK(!gated);
-    surf_sync_session("all",2); CHECK(!gated && !surf_sync_enabled());
+    surf_sync_session("all",2); CHECK(!gated && surf_sync_enabled());
     surf_sync_flip_completed(true); CHECK(!gated);
     surf_sync_stop();
     now_us = 12345;
@@ -288,7 +288,7 @@ int main() {
     }
     CHECK(reopened);
     surf_sync_reconnect("sports", 3);
-    CHECK(!surf_sync_enabled() && !gated);
+    CHECK(surf_sync_enabled() && !gated);
     surf_sync_stop();
     test_source_change_after_cut();
     test_source_change_before_cut();
@@ -299,6 +299,8 @@ int main() {
     test_pause_resume_excludes_paused_time();
     test_enable_disable_stop_and_generation();
     test_late_callback_after_timeout();
+    surf_sync_reconnect("", 3);
+    CHECK(!surf_sync_enabled() && !gated && !surf_sync_recovery_pending());
 
     printf("Surf state machine: %u checks, %u failures\n",checks,failures);
     return failures ? 1 : 0;

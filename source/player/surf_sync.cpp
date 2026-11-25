@@ -30,12 +30,13 @@ static u32 fnv1a(const char *s) {
 }
 
 static bool s_active = false, s_have_source = false;
-static bool s_enabled = false; // per session, opt-in by controller
+static bool s_enabled = false; // default on for Surf; per-session override
 static u32 s_generation = 0, s_epoch = 0;
 static u32 s_session_nonce = 0, s_connection = 0;
 static u32 s_source_hash = 0, s_boot_hash = 0;
 static char s_mode[24], s_source[152];
 static bool s_transition_pending = false, s_gating = false;
+static bool s_recovery_due = false;
 static bool s_have_luma = false, s_cut_found = false;
 static u8 s_luma[64] = {0};
 static u32 s_last_luma_seq = 0, s_candidate_seq = 0;
@@ -105,13 +106,14 @@ static void sync_session(const char *mode, u32 generation, bool reconnect) {
         s_connection = 0;
     }
     s_active = mode && mode[0];
-    s_enabled = same && s_enabled;
+    s_enabled = s_active && (same ? s_enabled : true);
     snprintf(s_mode, sizeof s_mode, "%s", mode ? mode : "");
     s_source[0] = '\0';
     s_generation = generation;
     s_epoch = 0; s_source_hash = s_boot_hash = 0;
     s_have_source = false;
     s_transition_pending = s_gating = false;
+    s_recovery_due = false;
     s_have_luma = s_cut_found = false;
     s_last_luma_seq = s_candidate_seq = s_flip_seq = 0;
     s_flip_qualified = false;
@@ -137,6 +139,7 @@ void surf_sync_set_enabled(bool enabled) {
         s_enabled = next;
         s_transition_pending = false;
         s_gating = false;
+        s_recovery_due = false;
         s_cut_found = false;
         s_flip_qualified = false;
         audio_set_transition_gate(false);
@@ -160,6 +163,7 @@ void surf_sync_stop(void) {
     lock_state();
     s_active = false; s_transition_pending = false;
     s_gating = false; s_have_source = false;
+    s_recovery_due = false;
     s_flip_qualified = false;
     s_paused = false; s_pause_at = 0;
     audio_set_transition_gate(false);
@@ -192,6 +196,14 @@ void surf_sync_observe_source(const char *mode, const char *source,
         s_epoch++;
         epoch = s_epoch;
         s_transition_pending = s_enabled;
+        // Publish the mute as soon as a publisher change is observed. Only
+        // the audio writer touches the DMA ring.
+        if (s_enabled && !s_paused && !s_gating && !audio_passthrough_active()) {
+            s_gating = true;
+            s_gate_at = timing_get_us();
+            s_recovery_due = false;
+            audio_set_transition_gate(true);
+        }
         // Superseding a transition invalidates every unconfirmed flip and cut.
         s_flip_qualified = false;
         s_cut_found = false;
@@ -209,7 +221,7 @@ void surf_sync_observe_source(const char *mode, const char *source,
 }
 
 void surf_sync_display_tick(bool paused) {
-    bool start = false, release = false;
+    bool start = false, recover = false;
     u64 age_ms = 0;
     u32 epoch = 0;
     const u64 now = timing_get_us();
@@ -229,7 +241,8 @@ void surf_sync_display_tick(bool paused) {
         const bool already_gated = s_gating;
         s_gating = !audio_passthrough_active();
         // Repeated rotations cannot indefinitely extend a continuous mute.
-        if (!already_gated) s_gate_at = now;
+        if (!already_gated) { s_gate_at = now; s_recovery_due = false; }
+        if (!s_gating) s_recovery_due = false;
         s_cut_found = false;
         s_flip_qualified = false;
         s_have_luma = false;
@@ -240,14 +253,13 @@ void surf_sync_display_tick(bool paused) {
         event_locked("source_changed", start ? "audio_gate_started" :
                                                     "bitstream_gate_skipped");
     }
-    // Recovery ceiling, not the synchronization strategy: avoid a permanently
-    // silent stream when a channel freezes or no visible scene cut is detected.
-    if (s_active && s_enabled && s_gating && !paused &&
+    // A timeout is not evidence of a matching picture. Keep PCM muted and
+    // request recovery using the main player's bounded live reconnect budget.
+    // A qualified late flip can clear the request before recovery.
+    if (s_active && s_enabled && s_gating && !paused && !s_recovery_due &&
         now >= s_gate_at && now - s_gate_at >= 3000000ULL) {
-        s_gating = false;
-        s_flip_qualified = false;
-        audio_set_transition_gate(false);
-        release = true;
+        s_recovery_due = true;
+        recover = true;
         age_ms = (now - s_gate_at) / 1000ULL;
         epoch = s_epoch;
         event_locked("playback_stalled", "gate_timeout_recovery");
@@ -258,12 +270,19 @@ void surf_sync_display_tick(bool paused) {
         snprintf(b, sizeof b, "surf_sync: epoch=%u pcm_gate=ON", (unsigned)epoch);
         plog(b);
     }
-    if (release) {
+    if (recover) {
         char b[110];
-        snprintf(b, sizeof b, "surf_sync: epoch=%u timeout=%llums pcm_gate=OFF",
+        snprintf(b, sizeof b, "surf_sync: epoch=%u timeout=%llums pcm_gate=HELD",
                  (unsigned)epoch, (unsigned long long)age_ms);
         plog(b);
     }
+}
+
+bool surf_sync_recovery_pending(void) {
+    lock_state();
+    const bool pending = s_active && s_enabled && s_gating && s_recovery_due && !s_paused;
+    unlock_state();
+    return pending;
 }
 
 void surf_sync_probe_video(const u8 *y, u32 width, u32 height, u32 sequence,
@@ -319,6 +338,7 @@ void surf_sync_flip_completed(bool success) {
         !s_transition_pending && s_cut_found &&
         surf_seq_reached(s_flip_seq, s_candidate_seq)) {
         s_gating = false;
+        s_recovery_due = false;
         audio_set_transition_gate(false);
         release = true; epoch = s_epoch;
         seq = s_flip_seq; pts = s_candidate_pts;

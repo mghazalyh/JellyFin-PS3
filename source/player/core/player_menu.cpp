@@ -640,7 +640,7 @@ void player_open_options(PlayerState *ps, int row) {
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "Publisher state may lead screen"); n++;
         s_opt_kind[n] = OPT_SURF_SYNC; s_opt_items[n] = "Adaptive Audio Sync (Beta)";
         snprintf(s_opt_valbuf[n], sizeof s_opt_valbuf[n], "%s",
-                 surf_sync_enabled() ? "On (experimental)" : "Off by default"); n++;
+                 surf_sync_enabled() ? "On (experimental)" : "Off (override)"); n++;
     }
     if (chapters) {
         s_opt_kind[n] = OPT_CHAPTERS; s_opt_items[n] = TR("Chapters");
