@@ -8,6 +8,7 @@
 
 #include "player_internal.h"
 #include "audio.h"
+#include "audio_bitstream.h"
 #include "video.h"
 #include "timing.h"
 #include "plog.h"
@@ -160,6 +161,30 @@ void player_display_frame(PlayerState *ps) {
             s_d_calls = s_d_notready = s_d_empty = 0;
         }
     }
+    // Gate the actual staged texture, not just the jitter-buffer head.
+    // A 2.3 s forward PTS jump is outside the duration servo's correction
+    // range. Keep drawing the last front texture until PCM catches up.
+    const bool surf_guard_enabled = ps->live && g_prog.surf_mode[0] &&
+        !one_to_one && !ps->paused && !ps->surf_wait_picture &&
+        ps->frame_count > 0 && s_timing_ready && s_vid_frame_ready &&
+        !audio_transition_gate_active() && !audio_passthrough_active() &&
+        audio_clock_valid();
+    const u64 guard_audio = surf_guard_enabled ? audio_get_clock_us() : 0;
+    const u64 guard_video = surf_guard_enabled ? s_vid_uploaded_pts_us : 0;
+    const SurfDisplayDecision guard = surf_display_guard_step(
+        &ps->surf_display_guard, surf_guard_enabled, timing_get_us(),
+        guard_video, guard_audio);
+    const bool hold_ahead = guard == SURF_DISPLAY_HOLD_BEGIN || guard == SURF_DISPLAY_HOLD;
+    if (guard == SURF_DISPLAY_HOLD_BEGIN || guard == SURF_DISPLAY_RESUME ||
+        guard == SURF_DISPLAY_ABORT) {
+        char b[112];
+        snprintf(b, sizeof b, "surf_display: %s offset=%lldus",
+            guard == SURF_DISPLAY_HOLD_BEGIN ? "hold" :
+            guard == SURF_DISPLAY_RESUME ? "resume" : "bounded_abort",
+            (long long)live_pts_delta_us(guard_video, guard_audio));
+        plog(b);
+    }
+
     // Prime a real picture while Surf audio is held. Do not let the normal
     // audio-driven timing correction wait on the clock that we are holding.
     // Do not consume the queued duration until the confirmed flip releases us.
@@ -220,7 +245,7 @@ void player_display_frame(PlayerState *ps) {
             do_pop = true;                // render_blend stays false: pure A
         }
 one_to_one_done: ;
-    } else if (!one_to_one && !ps->paused && s_vid_frame_ready && s_timing_ready && jbuf_count() > 0) {
+    } else if (!hold_ahead && !one_to_one && !ps->paused && s_vid_frame_ready && s_timing_ready && jbuf_count() > 0) {
         // Measurement only — result discarded; EMA updated for logging.
         // play_base lets avsync fold out an absolute (sub-burn) video PTS.
         const s64 raw60 = avsync_compute_diff(jbuf_peek_pts_us(), ps->play_base_us, ps->live);

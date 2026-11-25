@@ -1091,7 +1091,7 @@ ntfs-write-check:
 	bash fixtures/fs/ntfs_write_check.sh quick be
 
 
-test_surf_gate: test_surf_gate.cpp ../source/player/surf_gate_logic.h ../source/player/surf_history.h ../source/api/json_lite.h
+test_surf_gate: test_surf_gate.cpp ../source/player/surf_gate_logic.h ../source/player/surf_history.h ../source/api/json_lite.h ../source/player/surf_display_guard.h ../source/util/live_pts_delta.h
 	$(CXX) $(CXXFLAGS) -Wextra -o $@ $<
 
 # Packet-aligned read-ahead allocation floor and bounded fallback.

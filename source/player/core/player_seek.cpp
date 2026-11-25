@@ -270,6 +270,7 @@ bool player_execute_seek(PlayerState *ps) {
     crash_log("jc2 jbuf_clear done");
     video_reset_demux();
     avsync_reset();
+    surf_display_guard_reset(&ps->surf_display_guard);
     s_vid_frame_ready = false;
     s_vid_b_present   = false;
     crash_log("sk3 flushed");

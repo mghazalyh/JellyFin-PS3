@@ -10,6 +10,7 @@
 #include "local_probe.h"
 #include "local_sidecar.h"
 #include "stream_request.h"   // StreamRequest (player_stream_request)
+#include "surf_display_guard.h"
 
 // A subtitle track that is a file beside the video, not a track of it (PlayerLocal.sidecar).
 #define LOCAL_SIDECAR_BASE 0x10000
@@ -183,6 +184,7 @@ struct PlayerState {
     // on the flip it is actually about to queue.
     bool     surf_new_picture;
     bool     surf_wait_picture; // first real flip required after Surf open/reopen
+    SurfDisplayGuard surf_display_guard; // per-playback bounded PTS hold
     u32      surf_presented_seq;
     u64      surf_presented_pts_us; // anchor texture PTS, before upload acknowledgement
 
