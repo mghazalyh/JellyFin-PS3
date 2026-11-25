@@ -186,3 +186,41 @@ static inline LiveEvent live_watch_surf_step(LiveWatch *w, SurfPresentationWatch
         live_watch_may_reconnect(w, now_us)) return LIVE_EV_STALLED;
     return LIVE_EV_NONE;
 }
+
+
+// A conservative audio-only failure watchdog. It does not estimate lip sync,
+// adjust PTS or increase buffering. Main thread only; reset when observation
+// is invalid (pause, transition gate, startup, passthrough or reopen).
+#define SURF_AUDIO_WATCH_US 5000000ULL
+typedef struct {
+    bool valid;
+    uint64_t at_us, audio_us;
+    uint32_t starves;
+    unsigned bad_windows;
+} SurfAudioWatch;
+static inline void surf_audio_watch_reset(SurfAudioWatch *w) {
+    w->valid = false;
+    w->at_us = w->audio_us = 0;
+    w->starves = 0;
+    w->bad_windows = 0;
+}
+static inline bool surf_audio_watch_due(const SurfAudioWatch *w, uint64_t now) {
+    return !w->valid || now < w->at_us || now - w->at_us >= SURF_AUDIO_WATCH_US;
+}
+static inline bool surf_audio_watch_sample(SurfAudioWatch *w, uint64_t now,
+                                           uint64_t audio, uint32_t starves) {
+    if (!w->valid || now < w->at_us || audio < w->audio_us ||
+        starves < w->starves || now - w->at_us > 2 * SURF_AUDIO_WATCH_US) {
+        surf_audio_watch_reset(w);
+        w->valid = true; w->at_us = now; w->audio_us = audio; w->starves = starves;
+        return false;
+    }
+    const uint64_t elapsed = now - w->at_us;
+    if (elapsed < SURF_AUDIO_WATCH_US) return false;
+    const uint64_t advance = audio - w->audio_us;
+    const bool bad = advance < elapsed && elapsed - advance >= 2000000ULL &&
+                     starves - w->starves >= 32;
+    w->bad_windows = bad ? (w->bad_windows < 2 ? w->bad_windows + 1 : 2) : 0;
+    w->at_us = now; w->audio_us = audio; w->starves = starves;
+    return w->bad_windows >= 2;
+}

@@ -1595,6 +1595,8 @@ void show_player_run(const JFItem *item, u32 resume_secs,
     live_watch_init(&live_w, timing_get_us());
     SurfPresentationWatch surf_present;
     surf_present_init(&surf_present, timing_get_us());
+    ps.surf_wait_picture = g_prog.surf_mode[0] != '\0';
+    SurfAudioWatch surf_audio_watch = {};
     u64 surf_health_at = timing_get_us();
     int surf_health_frames = 0;
 
@@ -1606,8 +1608,14 @@ void show_player_run(const JFItem *item, u32 resume_secs,
         // within one vblank, so 250 ms only ever fires in that case.
         const bool flip_done = !flip_queued || waitflip_timeout(250000);
         if (flip_queued && g_prog.surf_mode[0]) {
-            surf_present_complete(&surf_present, flip_done);
+            const bool new_picture = surf_present_complete(&surf_present, flip_done);
             surf_sync_flip_completed(flip_done);
+            if (ps.surf_wait_picture && new_picture) {
+                ps.surf_wait_picture = false;
+                __sync_synchronize();
+                s_audio_hold = false;
+                plog("surf_audio: first picture flip confirmed; startup hold released");
+            }
         }
         if (flip_queued && !flip_done) {
             static bool s_logged = false;
@@ -1863,6 +1871,23 @@ void show_player_run(const JFItem *item, u32 resume_secs,
                 surf_sync_health_event("playback_stalled", "audio_gate_reconnect");
                 plog("surf_sync: bounded reconnect requested; PCM stays gated");
             }
+            // Sample cheap counters only on the watchdog's five-second cadence.
+            // Two consecutive deficient windows with PCM starvation justify a
+            // bounded reopen, rather than changing the media clock or resampling.
+            const bool audio_observable = surf_live && !ps.paused && !s_audio_hold &&
+                !audio_transition_gate_active() && !audio_passthrough_active() &&
+                surf_present.have_presented && audio_us != 0;
+            if (!audio_observable) surf_audio_watch_reset(&surf_audio_watch);
+            else if (surf_audio_watch_due(&surf_audio_watch, now_lv)) {
+                u32 blocks = 0, starves = 0;
+                if (player_stats_audio_counts(&blocks, &starves) &&
+                    surf_audio_watch_sample(&surf_audio_watch, now_lv, audio_us, starves) &&
+                    ev == LIVE_EV_NONE && live_watch_may_reconnect(&live_w, now_lv)) {
+                    ev = LIVE_EV_STALLED;
+                    surf_sync_health_event("playback_stalled", "sustained_pcm_starvation");
+                    plog("surf_audio: sustained PCM starvation and clock deficit; bounded reconnect");
+                }
+            }
             if (surf_live && ev != LIVE_EV_NONE) {
                 const char *reason = ev == LIVE_EV_ENDED ? "stream_ended" :
                     ev == LIVE_EV_RESUME_STALE ? "resume_stale" :
@@ -1900,6 +1925,14 @@ void show_player_run(const JFItem *item, u32 resume_secs,
         if (live_label) act = HUD_ACTION_SEEK;
 
         if (act == HUD_ACTION_SEEK) {
+            // Arm before the reopen, not after player_execute_seek resumes audio.
+            // The target mode can change during a live channel skip.
+            if (live) {
+                s_audio_hold = true;
+                __sync_synchronize();
+                ps.surf_wait_picture = true;
+                surf_audio_watch_reset(&surf_audio_watch);
+            }
             g_prog.pos_valid = false;
             bool seek_ok;
             if (live && live_changed) {
@@ -1933,6 +1966,8 @@ void show_player_run(const JFItem *item, u32 resume_secs,
              !strcmp(surf_item_name, "Surf: Movies & Series") ? "movies-series" : "");
                 surf_sync_reconnect(g_prog.surf_mode, g_prog.gen);
                 surf_present_init(&surf_present, timing_get_us());
+                ps.surf_wait_picture = g_prog.surf_mode[0] != '\0';
+                if (!ps.surf_wait_picture) s_audio_hold = false;
                 surf_health_at = timing_get_us();
                 surf_health_frames = 0;
                 surf_menu_session_reset();
@@ -2005,9 +2040,11 @@ void show_player_run(const JFItem *item, u32 resume_secs,
                 live_hud_channel(&live_ch, live_utc);
             }
         }
-        // A picture staged, or none coming soon: a stream without one still has its sound.
-        if (s_audio_hold && (s_vid_frame_ready || ps.frame_count > 0 ||
-                             timing_get_us() - audio_hold_us > 3000000ULL))
+        // Legacy audio-only fallback for non-Surf media. Surf must wait for a
+        // successful video flip; timeout is handled by its existing watchdog.
+        if (!ps.surf_wait_picture && s_audio_hold &&
+            (s_vid_frame_ready || ps.frame_count > 0 ||
+             timing_get_us() - audio_hold_us > 3000000ULL))
             s_audio_hold = false;
         if (g_prog.surf_mode[0]) surf_sync_display_tick(ps.paused);
         player_display_frame(&ps);

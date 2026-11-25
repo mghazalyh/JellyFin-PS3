@@ -261,8 +261,26 @@ static void reopen(void) {
     CHECK(live_watch_step(&w, S(56), false, 0, false, 0) == LIVE_EV_NONE);
 }
 
+static void surf_audio_recovery(void) {
+    SurfAudioWatch w;
+    surf_audio_watch_reset(&w);
+    CHECK(surf_audio_watch_due(&w, S(100)));
+    CHECK(!surf_audio_watch_sample(&w, S(100), S(50), 0));
+    CHECK(!surf_audio_watch_due(&w, S(104)));
+    CHECK(!surf_audio_watch_sample(&w, S(105), S(55), 0));
+    CHECK(!surf_audio_watch_sample(&w, S(110), S(57), 50));
+    CHECK(surf_audio_watch_sample(&w, S(115), S(59), 100));
+    CHECK(!surf_audio_watch_sample(&w, S(120), S(64), 100));
+    CHECK(!surf_audio_watch_sample(&w, S(125), S(65), 100)); // no starvation evidence
+    CHECK(!surf_audio_watch_sample(&w, S(130), S(1), 0)); // reset/rebase
+    CHECK(!surf_audio_watch_sample(&w, S(135), S(2), 64));
+    surf_audio_watch_reset(&w); // pause/reopen/gate
+    CHECK(!surf_audio_watch_sample(&w, S(180), S(2), 64));
+    CHECK(!surf_audio_watch_sample(&w, S(200), S(3), 128)); // stale observation
+}
 int main(void) {
     surf_presentation();
+    surf_audio_recovery();
     CHECK(live_buffer_seconds(0) == 4 && live_buffer_seconds(1) == 8 && live_buffer_seconds(2) == 15);
     CHECK(live_buffer_seconds(-1) == 8 && live_buffer_seconds(3) == 8);
     CHECK(live_buffer_target(4000000u, 100000, 8) == 21277);

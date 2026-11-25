@@ -160,7 +160,13 @@ void player_display_frame(PlayerState *ps) {
             s_d_calls = s_d_notready = s_d_empty = 0;
         }
     }
-    if (one_to_one && !ps->paused && s_vid_frame_ready && s_timing_ready && jbuf_count() > 0) {
+    // Prime a real picture while Surf audio is held. Do not let the normal
+    // audio-driven timing correction wait on the clock that we are holding.
+    // Do not consume the queued duration until the confirmed flip releases us.
+    if (ps->surf_wait_picture && s_vid_frame_ready && jbuf_count() > 0 &&
+        (!ps->paused || ps->show_seek_frame)) {
+        do_pop = true;
+    } else if (one_to_one && !ps->paused && s_vid_frame_ready && s_timing_ready && jbuf_count() > 0) {
         // The RAW offset of the frame about to show decides the big moves;
         // the smoothed one lags ~10 frames, and acting on it after a reopen
         // (video ~1 s ahead of the new stream's sound) repeated a frame every

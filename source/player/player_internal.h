@@ -182,6 +182,7 @@ struct PlayerState {
     // swapped into the front texture. The caller records this exact sequence
     // on the flip it is actually about to queue.
     bool     surf_new_picture;
+    bool     surf_wait_picture; // first real flip required after Surf open/reopen
     u32      surf_presented_seq;
     u64      surf_presented_pts_us; // anchor texture PTS, before upload acknowledgement
 
