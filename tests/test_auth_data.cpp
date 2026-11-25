@@ -1,4 +1,5 @@
 #include "auth_data.h"
+#include "../source/net/http_auth_scope.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,5 +51,19 @@ int main() {
         assert(!read_config(invalid[i], &session));
         assert(memcmp(&session, &before, sizeof(session)) == 0);
     }
-    puts("auth_data: credential escaping and saved-session regressions passed");
+    // Only the configured API base and the same current token qualify.
+    const char *server = "http://server:8096";
+    assert(jf_auth_expiry_scope("http://server:8096/Users/Me", server, "current", "current"));
+    assert(jf_auth_expiry_scope("https://server/jellyfin/Items", "https://server/jellyfin/", "current", "current"));
+    assert(!jf_auth_expiry_scope("http://server:8097/api/surf/all", server, "current", "current"));
+    assert(!jf_auth_expiry_scope("http://server:8096/api/surf/all", server, "current", "current"));
+    assert(!jf_auth_expiry_scope("http://server:80960/Users/Me", server, "current", "current"));
+    assert(!jf_auth_expiry_scope("http://server:8096.evil/Users/Me", server, "current", "current"));
+    assert(!jf_auth_expiry_scope("https://server/jellyfin-other/Items", "https://server/jellyfin", "current", "current"));
+    assert(!jf_auth_expiry_scope("http://server:8096/Users/Me", server, "old", "current"));
+    assert(!jf_auth_expiry_scope("http://server:8096/Users/Me", server, "", "current"));
+    assert(!jf_auth_expiry_scope("http://server:8096/Users/Me", server, "current", ""));
+    assert(!jf_auth_expiry_scope(NULL, server, "current", "current"));
+    assert(!jf_auth_expiry_scope("http://server:8096/Users/Me", "", "current", "current"));
+    puts("auth_data: credential escaping, saved-session and auth-scope regressions passed");
 }

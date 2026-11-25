@@ -21,12 +21,15 @@
 #include "http.h"
 #include "https_client.h"
 #include "jf_paths.h"
+#include "http_auth_scope.h"
 
 // Jellyfin-layer hooks (api_auth.cpp): the per-install device id sent in the
-// MediaBrowser identity, and the expired-session flag raised on any
-// authenticated 401 so the UI can bounce back to the login screen.
+// MediaBrowser identity, and the expired-session flag raised only for the
+// current saved login's Jellyfin API scope, not a companion-service rejection.
 extern const char *jf_device_id(void);
 extern volatile bool g_auth_expired;
+extern char g_server[256];
+extern char g_token[256];
 
 static char s_raw_buf[RESPONSE_SIZE + 4096];
 
@@ -585,6 +588,14 @@ void http_end(void) {
 static int http_request_once(int method, const char *url, const char *body,
                              const char *token, char *out, int out_size,
                              const char *ctype = NULL, bool note_401 = true) {
+    // Keep the request identity stable if a detached worker completes after
+    // another sign-in. Never put this token snapshot in diagnostics.
+    char session_token[256] = {};
+    if (note_401 && jf_auth_expiry_scope(url, g_server, token, g_token) &&
+        strlen(token) < sizeof session_token) {
+        memcpy(session_token, token, strlen(token) + 1);
+        token = session_token;
+    }
     if (https_url(url)) {
         // API over TLS (firmware cellHttp); streaming stays on plain sockets.
         char auth[400];
@@ -596,7 +607,9 @@ static int http_request_once(int method, const char *url, const char *body,
                                    "application/json", out, out_size, &blen,
                                    s_first_byte_tries * HTTP_IO_TIMEOUT_SEC);
         if (blen > out_size - 1) plog("http: body TRUNCATED (https; raise RESPONSE_SIZE)");
-        if (status == 401 && token && token[0] && note_401) g_auth_expired = true;
+        if (status == 401 && note_401 &&
+            jf_auth_expiry_scope(url, g_server, session_token, g_token))
+            g_auth_expired = true;
         return status;
     }
     char host[256]; int port; char path[512];
@@ -682,10 +695,11 @@ static int http_request_once(int method, const char *url, const char *body,
         plog(b);
     }
 
-    // 401 on a request that carried a token: the saved session is dead
-    // (revoked server-side).  Login itself sends no token, so a wrong
-    // password can't trip this.
-    if (status == 401 && token && token[0] && note_401) g_auth_expired = true;
+    // A 401 from the configured Jellyfin API using the still-current token
+    // may indicate revocation. A companion-service 401 is local to its request.
+    if (status == 401 && note_401 &&
+            jf_auth_expiry_scope(url, g_server, session_token, g_token))
+            g_auth_expired = true;
 
     memset(out, 0, out_size);
     if (body_len > out_size - 1) {
